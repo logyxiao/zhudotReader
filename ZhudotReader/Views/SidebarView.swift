@@ -68,6 +68,14 @@ struct SidebarView: View {
             Spacer()
 
             if store.libraryRootURL != nil {
+                Button {
+                    store.collapseFolders(in: store.focusedSidebarNodes)
+                } label: {
+                    Image(systemName: "rectangle.compress.vertical")
+                }
+                .buttonStyle(.plain)
+                .help("折叠所有文件夹")
+
                 Menu {
                     LibraryCreationMenu(node: nil)
                 } label: {
@@ -219,9 +227,6 @@ private struct LibraryTreeNodeView: View {
                     }
                 } label: {
                     folderLabel
-                        .onDrag {
-                            LibraryDragPayload.provider(for: node, libraryID: libraryID ?? store.activeLibraryID)
-                        }
                         .contextMenu { folderContextMenu }
                 }
                 .onDrop(
@@ -235,7 +240,24 @@ private struct LibraryTreeNodeView: View {
                 .contextMenu { folderContextMenu }
             } else {
                 documentRow
-                    .onDrag { LibraryDragPayload.provider(for: node, libraryID: libraryID ?? store.activeLibraryID) }
+                    .background {
+                        if dropTargeted {
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(store.palette.accentSoft)
+                        }
+                    }
+                    .onDrop(
+                        of: [LibraryDragPayload.type],
+                        isTargeted: $dropTargeted
+                    ) { providers in
+                        handleLibraryDrop(providers) { payload in
+                            store.moveNode(
+                                path: payload.path,
+                                libraryID: payload.libraryID,
+                                to: node.url.deletingLastPathComponent()
+                            )
+                        }
+                    }
                     .contextMenu { documentContextMenu }
             }
         }
@@ -268,6 +290,20 @@ private struct LibraryTreeNodeView: View {
         }
     }
 
+    private var dragPreview: some View {
+        HStack(spacing: 7) {
+            Image(systemName: node.kind == .folder ? "folder.fill" : "doc.text")
+                .foregroundStyle(store.palette.accentDeep)
+            Text(node.name)
+                .font(.custom("Songti SC", size: 11))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .background(store.palette.paper)
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+    }
+
     private var folderLabel: some View {
         Group {
             if isRenaming {
@@ -291,6 +327,14 @@ private struct LibraryTreeNodeView: View {
                     .background(dropTargeted ? store.palette.accentSoft : Color.clear)
                     .clipShape(RoundedRectangle(cornerRadius: 4))
                     .contentShape(Rectangle())
+                    .onDrag {
+                        LibraryDragPayload.provider(
+                            for: node,
+                            libraryID: libraryID ?? store.activeLibraryID
+                        )
+                    } preview: {
+                        dragPreview
+                    }
                 }
                 .buttonStyle(.plain)
             }
@@ -342,6 +386,14 @@ private struct LibraryTreeNodeView: View {
                                 RoundedRectangle(cornerRadius: 4)
                                     .stroke(store.palette.accent.opacity(0.22), lineWidth: 1)
                             }
+                        }
+                        .onDrag {
+                            LibraryDragPayload.provider(
+                                for: node,
+                                libraryID: libraryID ?? store.activeLibraryID
+                            )
+                        } preview: {
+                            dragPreview
                         }
                     }
                     .buttonStyle(.plain)
@@ -404,6 +456,9 @@ private struct LibraryTreeNodeView: View {
         }
         Button("在 Finder 中显示", systemImage: "folder") {
             store.revealInFinder(node)
+        }
+        Button("排版优化", systemImage: "wand.and.stars") {
+            store.tidyNode(node)
         }
         Button("转成 Word", systemImage: "doc.richtext") {
             store.exportNodeToWord(node)
@@ -491,7 +546,16 @@ private struct LibraryDragPayload: Codable {
     static func provider(for node: LibraryNode, libraryID: String?) -> NSItemProvider {
         let payload = LibraryDragPayload(path: node.id, libraryID: libraryID ?? "")
         let data = (try? JSONEncoder().encode(payload)) ?? Data()
-        return NSItemProvider(item: data as NSData, typeIdentifier: type.identifier)
+        let provider = NSItemProvider()
+        provider.suggestedName = node.name
+        provider.registerDataRepresentation(
+            forTypeIdentifier: type.identifier,
+            visibility: .ownProcess
+        ) { completion in
+            completion(data, nil)
+            return nil
+        }
+        return provider
     }
 }
 
@@ -499,7 +563,9 @@ private func handleLibraryDrop(
     _ providers: [NSItemProvider],
     action: @escaping @MainActor (LibraryDragPayload) -> Void
 ) -> Bool {
-    guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(LibraryDragPayload.type.identifier) }) else {
+    guard let provider = providers.first(where: {
+        $0.hasItemConformingToTypeIdentifier(LibraryDragPayload.type.identifier)
+    }) else {
         return false
     }
     provider.loadDataRepresentation(forTypeIdentifier: LibraryDragPayload.type.identifier) { data, _ in

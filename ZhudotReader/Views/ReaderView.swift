@@ -142,6 +142,19 @@ struct ReaderView: View {
                 .background(store.palette.accentSoft)
                 .clipShape(RoundedRectangle(cornerRadius: 3))
                 .help(isEditing ? "Esc 退出编辑" : "双击正文进入编辑")
+            if !isEditing {
+                Button {
+                    store.jumpToBeginning(in: pane)
+                } label: {
+                    Image(systemName: "arrow.up.to.line")
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(store.palette.faint)
+                .disabled(store.readingOffset(in: pane) == 0)
+                .help(store.preferences.mode == .scroll ? "返回顶部" : "返回第一页")
+            }
             if pane == .comparison {
                 Button {
                     store.closeComparison()

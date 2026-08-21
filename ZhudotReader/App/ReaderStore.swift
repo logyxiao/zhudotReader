@@ -559,6 +559,20 @@ final class ReaderStore {
         }
     }
 
+    func collapseFolders(in nodes: [LibraryNode]) {
+        var folderIDs: Set<String> = []
+
+        func collectFolderIDs(from nodes: [LibraryNode]) {
+            for node in nodes where node.kind == .folder {
+                folderIDs.insert(node.id)
+                collectFolderIDs(from: node.children)
+            }
+        }
+
+        collectFolderIDs(from: nodes)
+        expandedFolderIDs.subtract(folderIDs)
+    }
+
     func revealInFinder(_ node: LibraryNode) {
         NSWorkspace.shared.activateFileViewerSelecting([node.url])
     }
@@ -599,6 +613,106 @@ final class ReaderStore {
     func revealExportedWord() {
         guard let exportedWordURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([exportedWordURL])
+    }
+
+    func optimizeActiveLayout() {
+        let pane = activeReaderPane
+        guard let document = document(in: pane) else { return }
+        let editingThis = isEditingContent && editingPane == pane
+        let source = editingThis ? draftText : document.sourceText
+        let tidied = TextTidy.optimize(source)
+        guard tidied != source else {
+            exportedWordURL = nil
+            noticeMessage = "排版已经很整齐，没有多余空行。"
+            return
+        }
+        if editingThis {
+            draftText = tidied
+            isDraftDirty = true
+            draftEpoch += 1
+            applyDocumentSource(tidied, in: pane)
+            scheduleDraftSave()
+            exportedWordURL = nil
+            noticeMessage = "已优化排版，退出编辑后保存。"
+            refreshFindHitsIfNeeded()
+            return
+        }
+        Task { await writeTidiedDocument(tidied, in: pane, url: document.url) }
+    }
+
+    func tidyNode(_ node: LibraryNode) {
+        guard node.kind == .document else { return }
+        if let pane = paneShowing(node.id) {
+            let editingThis = isEditingContent && editingPane == pane
+            if !editingThis {
+                activateReader(pane)
+                optimizeActiveLayout()
+                return
+            }
+        }
+        Task {
+            do {
+                try validateManagedURL(node.url)
+                if let libraryID = owningLibraryID(for: node.url),
+                   let library = libraries.first(where: { $0.id == libraryID }) {
+                    bookmarkStore.access(library.url)
+                }
+                let data = try Data(contentsOf: node.url)
+                let source = try TextDecoder.decode(data, fileName: node.name)
+                let tidied = TextTidy.optimize(source)
+                guard tidied != source else {
+                    exportedWordURL = nil
+                    noticeMessage = "「\(node.name)」排版已经很整齐。"
+                    return
+                }
+                try await Task.detached {
+                    try Data(tidied.utf8).write(to: node.url, options: .atomic)
+                }.value
+                await reloadAfterFileOperation(
+                    preferredDocumentPath: currentDocument?.id,
+                    preferredComparisonPath: comparisonDocument?.id
+                )
+                exportedWordURL = nil
+                noticeMessage = "已优化「\(node.name)」的排版并保存。"
+            } catch {
+                errorMessage = ReaderError.fileOperationFailed(error.localizedDescription).localizedDescription
+            }
+        }
+    }
+
+    private func paneShowing(_ documentID: String) -> ReaderPane? {
+        if currentDocument?.id == documentID { return .primary }
+        if comparisonDocument?.id == documentID { return .comparison }
+        return nil
+    }
+
+    private func writeTidiedDocument(_ tidied: String, in pane: ReaderPane, url: URL) async {
+        do {
+            try validateManagedURL(url)
+            if let libraryID = owningLibraryID(for: url),
+               let library = libraries.first(where: { $0.id == libraryID }) {
+                bookmarkStore.access(library.url)
+            }
+            let previousOffset = readingOffset(in: pane)
+            try await Task.detached {
+                try Data(tidied.utf8).write(to: url, options: .atomic)
+            }.value
+            applyDocumentSource(tidied, in: pane)
+            if let updated = document(in: pane) {
+                let clamped = min(previousOffset, updated.characterCount)
+                updateReadingOffset(clamped, in: pane)
+                if pane == .primary {
+                    requestLocation(clamped)
+                } else {
+                    requestComparisonLocation(clamped)
+                }
+            }
+            exportedWordURL = nil
+            noticeMessage = "已优化排版并保存。"
+            refreshFindHitsIfNeeded()
+        } catch {
+            errorMessage = ReaderError.fileOperationFailed(error.localizedDescription).localizedDescription
+        }
     }
 
     private func exportToWord(sourceURL: URL, source: String) {
@@ -659,7 +773,10 @@ final class ReaderStore {
     }
 
     func moveNodeToLibraryRoot(path: String, libraryID: String) {
-        guard let root = libraryRootURL else { return }
+        guard let root = libraries.first(where: { $0.id == libraryID })?.url else {
+            errorMessage = "找不到文件所属的书库。"
+            return
+        }
         moveNode(path: path, libraryID: libraryID, to: root)
     }
 
@@ -707,6 +824,16 @@ final class ReaderStore {
             requestComparisonLocation(chapter.offset)
         }
         updateReadingOffset(chapter.offset, in: pane)
+    }
+
+    func jumpToBeginning(in pane: ReaderPane) {
+        guard document(in: pane) != nil else { return }
+        if pane == .primary {
+            requestLocation(0)
+        } else {
+            requestComparisonLocation(0)
+        }
+        updateReadingOffset(0, in: pane)
     }
 
     func moveChapter(by delta: Int) {

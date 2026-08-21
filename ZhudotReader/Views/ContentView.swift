@@ -98,6 +98,14 @@ struct ContentView: View {
                     .disabled(store.activeReadingDocument == nil)
 
                     Button {
+                        store.optimizeActiveLayout()
+                    } label: {
+                        Label("排版优化", systemImage: "wand.and.stars")
+                    }
+                    .help("排版优化：去掉多余空行，段落整齐排列")
+                    .disabled(store.activeReadingDocument == nil)
+
+                    Button {
                         store.exportActiveDocumentToWord()
                     } label: {
                         Label("转成 Word", systemImage: "doc.richtext")
@@ -210,64 +218,7 @@ private struct LibraryTabsView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
                     ForEach(store.libraries) { library in
-                        let isBrowsing = store.activeLibraryID == library.id
-                        let isPrimary = store.primaryLibraryID == library.id && store.currentDocument != nil
-                        let isComparison = store.comparisonLibraryID == library.id && store.showsComparisonLayout
-                        Button {
-                            if NSEvent.modifierFlags.contains(.option), store.currentDocument != nil {
-                                store.compareLibrary(library.id)
-                            } else {
-                                store.selectLibrary(library.id)
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: isBrowsing ? "folder.fill" : "folder")
-                                    .font(.system(size: 11, weight: .medium))
-                                Text(library.name)
-                                    .font(.system(size: 11, weight: isBrowsing ? .semibold : .regular))
-                                    .lineLimit(1)
-                                if isComparison {
-                                    Text("对照")
-                                        .font(.system(size: 8, weight: .medium))
-                                        .padding(.horizontal, 4)
-                                        .padding(.vertical, 1)
-                                        .background(store.palette.accentSoft)
-                                        .clipShape(RoundedRectangle(cornerRadius: 3))
-                                } else if isPrimary, store.showsComparisonLayout {
-                                    Text("主文")
-                                        .font(.system(size: 8, weight: .medium))
-                                        .foregroundStyle(store.palette.faint)
-                                }
-                            }
-                            .foregroundStyle(isBrowsing ? store.palette.accentDeep : store.palette.muted)
-                            .padding(.horizontal, 10)
-                            .frame(height: 27)
-                            .background(isBrowsing ? store.palette.paper : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 5))
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 5)
-                                    .stroke(
-                                        isComparison
-                                            ? store.palette.accent.opacity(0.7)
-                                            : (isBrowsing ? store.palette.border : Color.clear),
-                                        lineWidth: 1
-                                    )
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help(isComparison ? "切换到对照栏" : (isPrimary && store.showsComparisonLayout ? "切换到主文栏" : library.url.path))
-                        .contextMenu {
-                            if store.currentDocument != nil {
-                                Button("作为对照书库打开") {
-                                    store.compareLibrary(library.id)
-                                }
-                            }
-                            Button("从标签栏移除", role: .destructive) {
-                                store.removeLibrary(library.id)
-                            }
-                            Text("磁盘文件会保留")
-                        }
+                        LibraryTab(library: library)
                     }
                 }
             }
@@ -286,6 +237,94 @@ private struct LibraryTabsView: View {
             .background(store.palette.sidebarStrong.opacity(0.7))
             .clipShape(RoundedRectangle(cornerRadius: 5))
             .help("添加书库")
+        }
+    }
+}
+
+private struct LibraryTab: View {
+    @Environment(ReaderStore.self) private var store
+    let library: LibrarySource
+    @State private var hovering = false
+
+    var body: some View {
+        let isBrowsing = store.activeLibraryID == library.id
+        let isPrimary = store.primaryLibraryID == library.id && store.currentDocument != nil
+        let isComparison = store.comparisonLibraryID == library.id && store.showsComparisonLayout
+
+        ZStack(alignment: .trailing) {
+            Button {
+                if NSEvent.modifierFlags.contains(.option), store.currentDocument != nil {
+                    store.compareLibrary(library.id)
+                } else {
+                    store.selectLibrary(library.id)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: isBrowsing ? "folder.fill" : "folder")
+                        .font(.system(size: 11, weight: .medium))
+                    Text(library.name)
+                        .font(.system(size: 11, weight: isBrowsing ? .semibold : .regular))
+                        .lineLimit(1)
+                    if isComparison {
+                        Text("对照")
+                            .font(.system(size: 8, weight: .medium))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(store.palette.accentSoft)
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                    } else if isPrimary, store.showsComparisonLayout {
+                        Text("主文")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(store.palette.faint)
+                    }
+                }
+                .foregroundStyle(isBrowsing ? store.palette.accentDeep : store.palette.muted)
+                .padding(.leading, 10)
+                .padding(.trailing, 22)
+                .frame(height: 27)
+                .background(isBrowsing ? store.palette.paper : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(
+                            isComparison
+                                ? store.palette.accent.opacity(0.7)
+                                : (isBrowsing ? store.palette.border : Color.clear),
+                            lineWidth: 1
+                        )
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isComparison ? "切换到对照栏" : (isPrimary && store.showsComparisonLayout ? "切换到主文栏" : library.url.path))
+
+            Button {
+                store.removeLibrary(library.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(store.palette.muted)
+                    .frame(width: 16, height: 16)
+                    .background(hovering ? store.palette.sidebarStrong : Color.clear)
+                    .clipShape(Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 4)
+            .opacity(hovering ? 1 : 0)
+            .help("从标签栏移除（磁盘文件保留）")
+        }
+        .onHover { hovering = $0 }
+        .contextMenu {
+            if store.currentDocument != nil {
+                Button("作为对照书库打开") {
+                    store.compareLibrary(library.id)
+                }
+            }
+            Button("从标签栏移除", role: .destructive) {
+                store.removeLibrary(library.id)
+            }
+            Text("磁盘文件会保留")
         }
     }
 }

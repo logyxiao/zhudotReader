@@ -55,7 +55,22 @@ enum ReaderMode: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
     var label: String { self == .scroll ? "滚动" : "翻页" }
-    var symbol: String { self == .scroll ? "scroll" : "rectangle.split.2x1" }
+    var symbol: String { self == .scroll ? "scroll" : "book.pages" }
+}
+
+enum TextTidy {
+    /// 去掉段落之间的空行分隔，每段独占一行连续排列；行内缩进保留，换行统一为 \n。
+    static func optimize(_ text: String) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        var lines: [Substring] = []
+        for line in normalized.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+            lines.append(line)
+        }
+        return lines.joined(separator: "\n")
+    }
 }
 
 enum ReaderPane: String, Sendable {

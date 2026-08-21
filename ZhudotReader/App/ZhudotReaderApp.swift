@@ -100,6 +100,9 @@ struct ZhudotReaderApp: App {
                     .disabled(store.activeReadingDocument == nil || store.isEditingContent)
                 Button("退出编辑") { store.exitEditMode() }
                     .disabled(!store.isEditingContent)
+                Button("排版优化") { store.optimizeActiveLayout() }
+                    .keyboardShortcut("t", modifiers: [.command, .option])
+                    .disabled(store.activeReadingDocument == nil)
                 Button("转成 Word") { store.exportActiveDocumentToWord() }
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                     .disabled(store.activeReadingDocument == nil || store.isExportingWord)
