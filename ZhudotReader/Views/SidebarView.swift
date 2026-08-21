@@ -397,7 +397,7 @@ private struct LibraryTreeNodeView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .highPriorityGesture(
+                    .simultaneousGesture(
                         TapGesture(count: 2).onEnded {
                             store.openDocument(node, enterEdit: true)
                         }

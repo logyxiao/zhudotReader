@@ -15,6 +15,17 @@ final class ReaderStore {
         static let progress = "zhudot.reader.progress"
     }
 
+    private struct DocumentFileStamp: Equatable {
+        let modificationDate: Date?
+        let fileSize: Int?
+    }
+
+    private struct DocumentCacheEntry {
+        let document: ReaderDocument
+        let fileStamp: DocumentFileStamp
+        let preferences: ReaderPreferences
+    }
+
     var libraries: [LibrarySource] = []
     var activeLibraryID: String?
     var primaryLibraryID: String?
@@ -59,23 +70,11 @@ final class ReaderStore {
         didSet {
             guard preferences != oldValue else { return }
             persistPreferences()
-            if let currentDocument {
-                self.currentDocument = documentLoader.restyle(
-                    currentDocument,
-                    source: isEditingContent && editingPane == .primary ? draftText : currentDocument.sourceText,
-                    preferences: preferences,
-                    palette: palette
-                )
-                requestLocation(readingOffset)
-            }
-            if let comparisonDocument {
-                self.comparisonDocument = documentLoader.restyle(
-                    comparisonDocument,
-                    source: isEditingContent && editingPane == .comparison ? draftText : comparisonDocument.sourceText,
-                    preferences: preferences,
-                    palette: palette
-                )
-                requestComparisonLocation(comparisonReadingOffset)
+            if preferences.theme != oldValue.theme
+                || preferences.fontFamily != oldValue.fontFamily
+                || preferences.fontSize != oldValue.fontSize
+                || preferences.lineHeight != oldValue.lineHeight {
+                scheduleDocumentRestyle()
             }
         }
     }
@@ -156,12 +155,19 @@ final class ReaderStore {
     @ObservationIgnored private let scanner = LibraryScanner()
     @ObservationIgnored private let documentLoader = DocumentLoader()
     @ObservationIgnored private var libraryNodeCache: [String: [LibraryNode]] = [:]
+    @ObservationIgnored private var documentCache: [String: DocumentCacheEntry] = [:]
+    @ObservationIgnored private var documentCacheOrder: [String] = []
+    @ObservationIgnored private var primaryDocumentRequestID = UUID()
+    @ObservationIgnored private var comparisonDocumentRequestID = UUID()
     @ObservationIgnored private var lastDocumentByLibrary: [String: String]
     @ObservationIgnored private var progressByPath: [String: ReadingProgress]
     @ObservationIgnored private var progressSaveTask: Task<Void, Never>?
     @ObservationIgnored private var draftSaveTask: Task<Void, Never>?
     @ObservationIgnored private var restoreTask: Task<Void, Never>?
     @ObservationIgnored private var findSearchTask: Task<Void, Never>?
+    @ObservationIgnored private var restyleTask: Task<Void, Never>?
+
+    private static let documentCacheCharacterLimit = 4_000_000
 
     init() {
         preferences = Self.loadPreferences()
@@ -258,6 +264,8 @@ final class ReaderStore {
             closeComparison()
         }
         guard primaryLibraryID == libraryID else { return }
+        primaryDocumentRequestID = UUID()
+        comparisonDocumentRequestID = UUID()
         currentDocument = nil
         comparisonDocument = nil
         isPickingComparison = false
@@ -391,6 +399,7 @@ final class ReaderStore {
     }
 
     private func tearDownComparison() {
+        comparisonDocumentRequestID = UUID()
         comparisonDocument = nil
         comparisonLibraryID = nil
         isPickingComparison = false
@@ -1257,6 +1266,12 @@ final class ReaderStore {
         renamingNodeID = nil
         if let cached = libraryNodeCache[library.id] {
             publishSidebarNodes(cached, for: library.id)
+            await openPreferredDocument(
+                in: cached,
+                library: library,
+                path: lastDocumentByLibrary[library.id]
+            )
+            return
         }
         await scanLibrary(library, restoreDocument: lastDocumentByLibrary[library.id], shouldOpen: true)
     }
@@ -1298,16 +1313,7 @@ final class ReaderStore {
             publishSidebarNodes(nodes, for: library.id)
             isLoading = false
             guard shouldOpen, primaryLibraryID == library.id else { return }
-
-            if let path, let node = findDocument(path: path, in: nodes) {
-                await loadDocument(at: node.url, libraryID: library.id)
-            } else if let first = firstDocument(in: nodes) {
-                await loadDocument(at: first.url, libraryID: library.id)
-            } else {
-                currentDocument = nil
-                selectedDocumentID = nil
-                readingOffset = 0
-            }
+            await openPreferredDocument(in: nodes, library: library, path: path)
         } catch {
             isLoading = false
             if primaryLibraryID == library.id {
@@ -1319,16 +1325,17 @@ final class ReaderStore {
     private func loadDocument(at url: URL, libraryID: String? = nil) async {
         let targetLibraryID = libraryID ?? owningLibraryID(for: url) ?? activeLibraryID
         guard let targetLibraryID, libraries.contains(where: { $0.id == targetLibraryID }) else { return }
+        let requestID = UUID()
+        primaryDocumentRequestID = requestID
         await finishEditing()
         errorMessage = nil
         do {
             if let library = libraries.first(where: { $0.id == targetLibraryID }) {
                 bookmarkStore.access(library.url)
             }
-            let document = try await Task.detached(priority: .userInitiated) { [preferences, palette, documentLoader] in
-                try documentLoader.load(url: url, preferences: preferences, palette: palette)
-            }.value
-            guard libraries.contains(where: { $0.id == targetLibraryID }) else { return }
+            let document = try await preparedDocument(at: url)
+            guard primaryDocumentRequestID == requestID,
+                  libraries.contains(where: { $0.id == targetLibraryID }) else { return }
             currentDocument = document
             primaryLibraryID = targetLibraryID
             selectedDocumentID = document.id
@@ -1342,13 +1349,17 @@ final class ReaderStore {
                 refreshFindHitsIfNeeded()
             }
         } catch {
-            errorMessage = error.localizedDescription
+            if primaryDocumentRequestID == requestID {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
     private func loadComparisonDocument(at url: URL, libraryID: String? = nil) async {
         let targetLibraryID = libraryID ?? owningLibraryID(for: url) ?? activeLibraryID
         guard let targetLibraryID, libraries.contains(where: { $0.id == targetLibraryID }) else { return }
+        let requestID = UUID()
+        comparisonDocumentRequestID = requestID
         if isEditingContent, editingPane == .comparison {
             await finishEditing()
         }
@@ -1358,10 +1369,9 @@ final class ReaderStore {
             if let library = libraries.first(where: { $0.id == targetLibraryID }) {
                 bookmarkStore.access(library.url)
             }
-            let document = try await Task.detached(priority: .userInitiated) { [preferences, palette, documentLoader] in
-                try documentLoader.load(url: url, preferences: preferences, palette: palette)
-            }.value
-            guard libraries.contains(where: { $0.id == targetLibraryID }) else { return }
+            let document = try await preparedDocument(at: url)
+            guard comparisonDocumentRequestID == requestID,
+                  libraries.contains(where: { $0.id == targetLibraryID }) else { return }
             comparisonDocument = document
             comparisonLibraryID = targetLibraryID
             isPickingComparison = false
@@ -1378,12 +1388,173 @@ final class ReaderStore {
                 refreshFindHitsIfNeeded()
             }
         } catch {
+            guard comparisonDocumentRequestID == requestID else { return }
             isLoadingComparison = false
             if comparisonDocument == nil {
                 isPickingComparison = true
             }
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func openPreferredDocument(
+        in nodes: [LibraryNode],
+        library: LibrarySource,
+        path: String?
+    ) async {
+        guard primaryLibraryID == library.id else { return }
+        if let path, let node = findDocument(path: path, in: nodes) {
+            await loadDocument(at: node.url, libraryID: library.id)
+        } else if let first = firstDocument(in: nodes) {
+            await loadDocument(at: first.url, libraryID: library.id)
+        } else {
+            currentDocument = nil
+            selectedDocumentID = nil
+            readingOffset = 0
+        }
+    }
+
+    private func preparedDocument(at url: URL) async throws -> ReaderDocument {
+        if let cached = cachedDocument(at: url) {
+            return cached
+        }
+
+        let loadingPreferences = preferences
+        let loadingPalette = palette
+        let document = try await Task.detached(priority: .userInitiated) { [documentLoader] in
+            try documentLoader.load(
+                url: url,
+                preferences: loadingPreferences,
+                palette: loadingPalette
+            )
+        }.value
+
+        if loadingPreferences == preferences {
+            cacheDocument(document, preferences: loadingPreferences)
+            return document
+        }
+
+        let currentPreferences = preferences
+        let currentPalette = palette
+        let restyled = await Task.detached(priority: .userInitiated) { [documentLoader] in
+            documentLoader.restyle(
+                document,
+                preferences: currentPreferences,
+                palette: currentPalette
+            )
+        }.value
+        cacheDocument(restyled, preferences: currentPreferences)
+        return restyled
+    }
+
+    private func scheduleDocumentRestyle() {
+        restyleTask?.cancel()
+        guard currentDocument != nil || comparisonDocument != nil else { return }
+
+        let targetPreferences = preferences
+        let targetPalette = palette
+        let primarySnapshot = currentDocument
+        let comparisonSnapshot = comparisonDocument
+        let primarySource = primarySnapshot.map {
+            isEditingContent && editingPane == .primary ? draftText : $0.sourceText
+        }
+        let comparisonSource = comparisonSnapshot.map {
+            isEditingContent && editingPane == .comparison ? draftText : $0.sourceText
+        }
+
+        restyleTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled else { return }
+
+            let results = await Task.detached(priority: .userInitiated) { [documentLoader] in
+                let primary = primarySnapshot.map {
+                    documentLoader.restyle(
+                        $0,
+                        source: primarySource,
+                        preferences: targetPreferences,
+                        palette: targetPalette
+                    )
+                }
+                let comparison = comparisonSnapshot.map {
+                    documentLoader.restyle(
+                        $0,
+                        source: comparisonSource,
+                        preferences: targetPreferences,
+                        palette: targetPalette
+                    )
+                }
+                return (primary, comparison)
+            }.value
+
+            guard let self,
+                  !Task.isCancelled,
+                  self.preferences == targetPreferences else { return }
+
+            if let original = primarySnapshot,
+               let restyled = results.0,
+               self.currentDocument?.id == original.id {
+                self.currentDocument = restyled
+                self.cacheDocument(restyled, preferences: targetPreferences)
+                self.requestLocation(self.readingOffset)
+            }
+            if let original = comparisonSnapshot,
+               let restyled = results.1,
+               self.comparisonDocument?.id == original.id {
+                self.comparisonDocument = restyled
+                self.cacheDocument(restyled, preferences: targetPreferences)
+                self.requestComparisonLocation(self.comparisonReadingOffset)
+            }
+        }
+    }
+
+    private func cachedDocument(at url: URL) -> ReaderDocument? {
+        let path = url.standardizedFileURL.path
+        guard let stamp = documentFileStamp(for: url),
+              let entry = documentCache[path],
+              entry.fileStamp == stamp,
+              entry.preferences == preferences else {
+            documentCache.removeValue(forKey: path)
+            documentCacheOrder.removeAll { $0 == path }
+            return nil
+        }
+        touchCachedDocument(path)
+        return entry.document
+    }
+
+    private func cacheDocument(_ document: ReaderDocument, preferences: ReaderPreferences) {
+        guard let stamp = documentFileStamp(for: document.url) else { return }
+        documentCache[document.id] = DocumentCacheEntry(
+            document: document,
+            fileStamp: stamp,
+            preferences: preferences
+        )
+        touchCachedDocument(document.id)
+
+        while cachedDocumentCharacterCount > Self.documentCacheCharacterLimit,
+              documentCacheOrder.count > 1 {
+            let removedPath = documentCacheOrder.removeFirst()
+            documentCache.removeValue(forKey: removedPath)
+        }
+    }
+
+    private func touchCachedDocument(_ path: String) {
+        documentCacheOrder.removeAll { $0 == path }
+        documentCacheOrder.append(path)
+    }
+
+    private var cachedDocumentCharacterCount: Int {
+        documentCache.values.reduce(0) { $0 + $1.document.characterCount }
+    }
+
+    private func documentFileStamp(for url: URL) -> DocumentFileStamp? {
+        guard let values = try? url.resourceValues(forKeys: [
+            .contentModificationDateKey,
+            .fileSizeKey
+        ]) else { return nil }
+        return DocumentFileStamp(
+            modificationDate: values.contentModificationDate,
+            fileSize: values.fileSize
+        )
     }
 
     private func requestLocation(_ offset: Int) {

@@ -73,7 +73,7 @@ struct PagedReaderView: View {
                 .frame(height: 40)
             }
             .task(id: key) {
-                paginate(size: geometry.size, spread: spread)
+                await paginate(size: geometry.size, spread: spread, key: key)
             }
             .onChange(of: locationRequest) { _, request in
                 locate(request.offset, spread: spread)
@@ -118,7 +118,7 @@ struct PagedReaderView: View {
         }
     }
 
-    private func paginate(size: CGSize, spread: Int) {
+    private func paginate(size: CGSize, spread: Int, key: PageLayoutKey) async {
         let controlsHeight: CGFloat = 40
         let dividerWidth: CGFloat = spread == 2 ? 1 : 0
         let columnWidth = max(220, (size.width - dividerWidth) / CGFloat(spread))
@@ -127,7 +127,15 @@ struct PagedReaderView: View {
             width: max(120, columnWidth - horizontalInset * 2),
             height: max(120, size.height - controlsHeight - 48)
         )
-        pages = TextPaginator.paginate(document.attributedText, pageSize: pageSize)
+        pages = []
+        pageIndex = 0
+        let result = await TextPaginationCache.shared.pages(
+            for: key,
+            document: document,
+            pageSize: pageSize
+        )
+        guard !Task.isCancelled else { return }
+        pages = result
         locate(locationRequest.offset, spread: spread)
     }
 
@@ -166,7 +174,7 @@ struct PagedReaderView: View {
     }
 }
 
-private struct PageLayoutKey: Hashable {
+private struct PageLayoutKey: Hashable, Sendable {
     let documentID: String
     let contentLength: Int
     let contentFingerprint: Int
@@ -176,6 +184,39 @@ private struct PageLayoutKey: Hashable {
     let fontSize: Double
     let lineHeight: Double
     let margin: Double
+}
+
+private actor TextPaginationCache {
+    static let shared = TextPaginationCache()
+
+    private var cachedPages: [PageLayoutKey: [NSRange]] = [:]
+    private var order: [PageLayoutKey] = []
+    private let limit = 12
+
+    func pages(
+        for key: PageLayoutKey,
+        document: ReaderDocument,
+        pageSize: CGSize
+    ) -> [NSRange] {
+        if let pages = cachedPages[key] {
+            touch(key)
+            return pages
+        }
+
+        let pages = TextPaginator.paginate(document.attributedText, pageSize: pageSize)
+        guard !Task.isCancelled else { return [] }
+        cachedPages[key] = pages
+        touch(key)
+        while order.count > limit {
+            cachedPages.removeValue(forKey: order.removeFirst())
+        }
+        return pages
+    }
+
+    private func touch(_ key: PageLayoutKey) {
+        order.removeAll { $0 == key }
+        order.append(key)
+    }
 }
 
 private enum TextPaginator {
@@ -188,6 +229,7 @@ private enum TextPaginator {
         var coveredCharacters = 0
 
         while coveredCharacters < storage.length {
+            guard !Task.isCancelled else { return [] }
             let container = NSTextContainer(size: pageSize)
             container.lineFragmentPadding = 0
             layoutManager.addTextContainer(container)

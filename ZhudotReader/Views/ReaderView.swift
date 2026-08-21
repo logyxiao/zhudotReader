@@ -59,7 +59,6 @@ struct ReaderView: View {
                         onDoubleClick: { store.enterEditMode(pane) },
                         onActivate: { store.activateReader(pane) }
                     )
-                    .id("scroll-\(document.id)")
                 } else {
                     PagedReaderView(
                         document: document,
@@ -119,21 +118,34 @@ struct ReaderView: View {
     private var readerHeader: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(document.url.deletingLastPathComponent().lastPathComponent)
-                    .font(.system(size: 8, design: .monospaced))
-                    .foregroundStyle(store.palette.faint)
-                    .lineLimit(1)
+                Button {
+                    NSWorkspace.shared.open(document.url.deletingLastPathComponent())
+                } label: {
+                    Text(document.url.path)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 8, design: .monospaced))
+                .foregroundStyle(store.palette.faint)
+                .help("在 Finder 中打开所属文件夹")
                 Text(document.title)
                     .font(.custom("Songti SC", size: 18).weight(.semibold))
                     .foregroundStyle(store.palette.text)
                     .lineLimit(1)
             }
+            .layoutPriority(1)
             Spacer()
             if store.showsComparisonLayout {
                 Text(pane == .primary ? "主文" : "对照")
                     .font(.custom("Songti SC", size: 10).weight(.medium))
                     .foregroundStyle(isActive ? store.palette.accentDeep : store.palette.faint)
             }
+            Text(readerMetricsLabel)
+                .font(.system(size: 8, design: .monospaced))
+                .foregroundStyle(store.palette.faint)
+                .fixedSize()
             Text(isEditing ? "编辑" : (document.format == .markdown ? "MARKDOWN" : "TXT"))
                 .font(.system(size: 8, weight: .medium, design: .monospaced))
                 .foregroundStyle(store.palette.accentDeep)
@@ -141,6 +153,7 @@ struct ReaderView: View {
                 .padding(.vertical, 4)
                 .background(store.palette.accentSoft)
                 .clipShape(RoundedRectangle(cornerRadius: 3))
+                .fixedSize()
                 .help(isEditing ? "Esc 退出编辑" : "双击正文进入编辑")
             if !isEditing {
                 Button {
@@ -183,11 +196,6 @@ struct ReaderView: View {
                 Text("正文 · 双击进入编辑")
             }
             Spacer()
-            Text("\((isEditing ? store.draftText as NSString : document.displayText as NSString).length.formatted()) 字符")
-            if !isEditing {
-                Text("·")
-                Text("\(store.readingPercentage(in: pane))%")
-            }
         }
         .font(.system(size: 8, design: .monospaced))
         .foregroundStyle(store.palette.faint)
@@ -206,6 +214,14 @@ struct ReaderView: View {
 
     private var isActive: Bool {
         store.activeReaderPane == pane
+    }
+
+    private var readerMetricsLabel: String {
+        let count = (isEditing ? store.draftText as NSString : document.displayText as NSString).length
+        if isEditing {
+            return "\(count.formatted()) 字"
+        }
+        return "\(count.formatted()) 字 · \(store.readingPercentage(in: pane))%"
     }
 
     private func handleKeyboard(_ key: ReaderKey) -> Bool {
