@@ -90,6 +90,14 @@ struct ContentView: View {
                     }
 
                     Button {
+                        store.presentFindBar()
+                    } label: {
+                        Label("查找", systemImage: "text.magnifyingglass")
+                    }
+                    .help("查找当前小说 · ⌘F")
+                    .disabled(store.activeReadingDocument == nil)
+
+                    Button {
                         store.exportActiveDocumentToWord()
                     } label: {
                         Label("转成 Word", systemImage: "doc.richtext")
@@ -123,7 +131,9 @@ struct ContentView: View {
         .toolbarBackground(store.palette.app, for: .windowToolbar)
         .toolbarBackground(.visible, for: .windowToolbar)
         .onExitCommand {
-            if store.isEditingContent {
+            if store.findBarPresented {
+                store.dismissFindBar()
+            } else if store.isEditingContent {
                 store.exitEditMode()
             } else if store.isPickingComparison {
                 store.cancelComparisonPick()
@@ -134,12 +144,17 @@ struct ContentView: View {
         } message: {
             Text(store.errorMessage ?? "未知错误")
         }
-        .alert("已导出 Word", isPresented: noticePresented) {
-            Button("在 Finder 中显示") {
-                store.revealExportedWord()
-                store.noticeMessage = nil
+        .alert(store.exportedWordURL == nil ? "完成" : "已导出 Word", isPresented: noticePresented) {
+            if store.exportedWordURL != nil {
+                Button("在 Finder 中显示") {
+                    store.revealExportedWord()
+                    store.noticeMessage = nil
+                }
             }
-            Button("好") { store.noticeMessage = nil }
+            Button("好") {
+                store.noticeMessage = nil
+                store.exportedWordURL = nil
+            }
         } message: {
             Text(store.noticeMessage ?? "")
         }

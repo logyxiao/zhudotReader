@@ -53,7 +53,8 @@ struct DocumentLoader {
             displayText: rendered.text,
             attributedText: rendered.attributed,
             chapters: chapters,
-            characterCount: (rendered.text as NSString).length
+            characterCount: (rendered.text as NSString).length,
+            contentFingerprint: (source as NSString).length &+ source.hashValue
         )
     }
 

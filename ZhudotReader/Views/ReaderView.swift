@@ -23,6 +23,10 @@ struct ReaderView: View {
         VStack(spacing: 0) {
             readerHeader
             Divider().overlay(store.palette.border)
+            if store.findBarPresented && store.findPane == pane {
+                FindBarView()
+                Divider().overlay(store.palette.border)
+            }
 
             Group {
                 if isEditing {
@@ -31,8 +35,16 @@ struct ReaderView: View {
                         text: store.draftText,
                         preferences: store.preferences,
                         palette: store.palette,
+                        draftEpoch: store.draftEpoch,
+                        searchHighlight: store.searchHighlight(in: pane),
                         onTextChange: store.updateDraft,
-                        onExit: store.exitEditMode
+                        onExit: {
+                            if store.findBarPresented && store.findPane == pane {
+                                store.dismissFindBar()
+                            } else {
+                                store.exitEditMode()
+                            }
+                        }
                     )
                     .id("edit-\(document.id)")
                 } else if store.preferences.mode == .scroll {
@@ -42,6 +54,7 @@ struct ReaderView: View {
                         palette: store.palette,
                         locationRequest: store.locationRequest(in: pane),
                         keyboardRequest: keyboardRequest,
+                        searchHighlight: store.searchHighlight(in: pane),
                         onProgress: { store.updateReadingOffset($0, in: pane) },
                         onDoubleClick: { store.enterEditMode(pane) },
                         onActivate: { store.activateReader(pane) }
@@ -54,6 +67,7 @@ struct ReaderView: View {
                         palette: store.palette,
                         locationRequest: store.locationRequest(in: pane),
                         keyboardRequest: keyboardRequest,
+                        searchHighlight: store.searchHighlight(in: pane),
                         onProgress: { store.updateReadingOffset($0, in: pane) },
                         onDoubleClick: { store.enterEditMode(pane) },
                         onActivate: { store.activateReader(pane) }
@@ -87,7 +101,9 @@ struct ReaderView: View {
             }
         }
         .onExitCommand {
-            if isEditing {
+            if store.findBarPresented && store.findPane == pane {
+                store.dismissFindBar()
+            } else if isEditing {
                 store.exitEditMode()
             }
         }

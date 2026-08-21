@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import Foundation
 import Observation
 import SwiftUI
@@ -42,6 +43,17 @@ final class ReaderStore {
     var locationRequest = ReadingLocationRequest(offset: 0)
     var comparisonReadingOffset = 0
     var comparisonLocationRequest = ReadingLocationRequest(offset: 0)
+    var findBarPresented = false
+    var findQuery = ""
+    var findReplacement = ""
+    var findShowsReplace = false
+    var findMatchCase = false
+    var findHits: [NSRange] = []
+    var findIndex = 0
+    var findPane: ReaderPane = .primary
+    var findFocusToken = UUID()
+    var findHighlight = SearchHighlightRequest.none
+    var draftEpoch = 0
 
     var preferences: ReaderPreferences {
         didSet {
@@ -117,6 +129,29 @@ final class ReaderStore {
         comparisonDocument != nil || isPickingComparison
     }
 
+    var findCounterLabel: String {
+        if findQuery.isEmpty { return "—" }
+        if findHits.isEmpty { return "无匹配" }
+        let suffix = findHits.count >= TextSearch.matchLimit ? "+" : ""
+        return "\(findIndex + 1)/\(findHits.count)\(suffix)"
+    }
+
+    var findJumpWindow: [FindJumpItem] {
+        guard !findHits.isEmpty, let text = findHaystack() else { return [] }
+        let start = max(0, findIndex - 40)
+        let end = min(findHits.count, findIndex + 41)
+        return (start..<end).map { index in
+            FindJumpItem(
+                index: index,
+                snippet: TextSearch.snippet(in: text, range: findHits[index])
+            )
+        }
+    }
+
+    func searchHighlight(in pane: ReaderPane) -> SearchHighlightRequest {
+        findBarPresented && findPane == pane ? findHighlight : .none
+    }
+
     @ObservationIgnored private let bookmarkStore = SecurityScopedBookmarkStore()
     @ObservationIgnored private let scanner = LibraryScanner()
     @ObservationIgnored private let documentLoader = DocumentLoader()
@@ -125,14 +160,17 @@ final class ReaderStore {
     @ObservationIgnored private var progressByPath: [String: ReadingProgress]
     @ObservationIgnored private var progressSaveTask: Task<Void, Never>?
     @ObservationIgnored private var draftSaveTask: Task<Void, Never>?
+    @ObservationIgnored private var restoreTask: Task<Void, Never>?
+    @ObservationIgnored private var findSearchTask: Task<Void, Never>?
 
     init() {
         preferences = Self.loadPreferences()
         lastDocumentByLibrary = Self.loadLastDocuments()
         progressByPath = Self.loadProgress()
-        Task { [weak self] in
+        restoreTask = Task { [weak self] in
             await self?.restoreLibraries()
         }
+        IncomingDocuments.attach(self)
     }
 
     func chooseLibrary() {
@@ -146,6 +184,33 @@ final class ReaderStore {
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task { await installLibrary(url) }
+    }
+
+    func chooseDocuments() {
+        let panel = NSOpenPanel()
+        panel.title = "打开文稿"
+        panel.message = "选择 TXT 或 Markdown 文件，用竹点阅读打开。"
+        panel.prompt = "打开"
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = Self.supportedDocumentTypes
+
+        guard panel.runModal() == .OK else { return }
+        openIncomingURLs(panel.urls)
+    }
+
+    func openIncomingURLs(_ urls: [URL]) {
+        for url in urls {
+            openIncomingURL(url)
+        }
+    }
+
+    func openIncomingURL(_ url: URL) {
+        Task {
+            await restoreTask?.value
+            await openExternalFile(url)
+        }
     }
 
     func refreshLibrary() {
@@ -333,6 +398,9 @@ final class ReaderStore {
         comparisonReadingOffset = 0
         requestComparisonLocation(0)
         comparisonSidebarNodes = []
+        if findPane == .comparison {
+            dismissFindBar()
+        }
         focusPane(.primary)
     }
 
@@ -359,6 +427,10 @@ final class ReaderStore {
             if let primaryLibraryID {
                 lastDocumentByLibrary[primaryLibraryID] = comparison.id
                 persistLastDocuments()
+            }
+            if findBarPresented {
+                findPane = findPane == .primary ? .comparison : .primary
+                scheduleFindSearch(immediate: true)
             }
             focusPane(.primary)
         }
@@ -646,6 +718,244 @@ final class ReaderStore {
         jump(to: chapters[target], in: pane)
     }
 
+    func presentFindBar(showsReplace: Bool = false) {
+        guard document(in: activeReaderPane) != nil || document(in: findPane) != nil else { return }
+        findPane = document(in: activeReaderPane) != nil ? activeReaderPane : findPane
+        findBarPresented = true
+        findShowsReplace = showsReplace
+        findFocusToken = UUID()
+        if !findQuery.isEmpty {
+            scheduleFindSearch(immediate: true)
+        } else {
+            publishFindHighlight()
+        }
+    }
+
+    func dismissFindBar() {
+        findBarPresented = false
+        findShowsReplace = false
+        findHits = []
+        findIndex = 0
+        findSearchTask?.cancel()
+        findHighlight = .none
+    }
+
+    func setFindMatchCase(_ matchCase: Bool) {
+        findMatchCase = matchCase
+        scheduleFindSearch(immediate: true)
+    }
+
+    func scheduleFindSearch(immediate: Bool = false) {
+        findSearchTask?.cancel()
+        guard findBarPresented else { return }
+        if immediate || findQuery.isEmpty {
+            recomputeFindHits()
+            return
+        }
+        findSearchTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(70))
+            guard !Task.isCancelled, let self else { return }
+            self.recomputeFindHits()
+        }
+    }
+
+    func advanceFind(by delta: Int) {
+        if !findBarPresented {
+            presentFindBar()
+            return
+        }
+        guard !findHits.isEmpty else { return }
+        let count = findHits.count
+        findIndex = (findIndex + delta % count + count) % count
+        revealCurrentFindHit()
+    }
+
+    func jumpToFindHit(at index: Int) {
+        guard findHits.indices.contains(index) else { return }
+        findIndex = index
+        revealCurrentFindHit()
+    }
+
+    func replaceCurrentFind() {
+        guard !findQuery.isEmpty, findHits.indices.contains(findIndex) else { return }
+        let range = findHits[findIndex]
+        if canReplaceInFileDirectly {
+            Task { await replaceInFile(range: range, replacingAll: false) }
+            return
+        }
+        ensureEditingForReplace()
+        guard findHits.indices.contains(findIndex) else { return }
+        applyReplaceInDraft(range: findHits[findIndex])
+    }
+
+    func replaceAllFind() {
+        guard !findQuery.isEmpty else { return }
+        if canReplaceInFileDirectly {
+            Task { await replaceInFile(range: nil, replacingAll: true) }
+            return
+        }
+        ensureEditingForReplace()
+        let result = TextSearch.replacing(
+            in: draftText,
+            query: findQuery,
+            replacement: findReplacement,
+            matchCase: findMatchCase
+        )
+        guard result.count > 0 else { return }
+        draftText = result.text
+        isDraftDirty = true
+        draftEpoch += 1
+        scheduleDraftSave()
+        noticeMessage = "已替换 \(result.count) 处。"
+        exportedWordURL = nil
+        recomputeFindHits(preferLocation: 0)
+    }
+
+    private var canReplaceInFileDirectly: Bool {
+        guard let document = document(in: findPane) else { return false }
+        if isEditingContent && editingPane == findPane { return false }
+        return document.format == .text || document.sourceText == document.displayText
+    }
+
+    private func ensureEditingForReplace() {
+        if !(isEditingContent && editingPane == findPane) {
+            beginEditing(findPane)
+            recomputeFindHits(preferLocation: readingOffset(in: findPane))
+        }
+    }
+
+    private func applyReplaceInDraft(range: NSRange) {
+        let ns = draftText as NSString
+        guard NSMaxRange(range) <= ns.length else {
+            recomputeFindHits()
+            return
+        }
+        let nextLocation = range.location + (findReplacement as NSString).length
+        draftText = ns.replacingCharacters(in: range, with: findReplacement)
+        isDraftDirty = true
+        draftEpoch += 1
+        scheduleDraftSave()
+        recomputeFindHits(preferLocation: nextLocation)
+    }
+
+    private func replaceInFile(range: NSRange?, replacingAll: Bool) async {
+        guard let document = document(in: findPane) else { return }
+        let source = document.sourceText
+        let updated: String
+        let count: Int
+        if replacingAll {
+            let result = TextSearch.replacing(
+                in: source,
+                query: findQuery,
+                replacement: findReplacement,
+                matchCase: findMatchCase
+            )
+            updated = result.text
+            count = result.count
+        } else if let range, NSMaxRange(range) <= (source as NSString).length {
+            updated = (source as NSString).replacingCharacters(in: range, with: findReplacement)
+            count = 1
+        } else {
+            return
+        }
+        guard count > 0, updated != source else { return }
+        do {
+            try validateManagedURL(document.url)
+            try await Task.detached {
+                try Data(updated.utf8).write(to: document.url, options: .atomic)
+            }.value
+            applyDocumentSource(updated, in: findPane)
+            if replacingAll {
+                noticeMessage = "已替换 \(count) 处。"
+                exportedWordURL = nil
+                recomputeFindHits(preferLocation: 0)
+            } else if let range {
+                recomputeFindHits(preferLocation: range.location + (findReplacement as NSString).length)
+            }
+        } catch {
+            errorMessage = ReaderError.fileOperationFailed(error.localizedDescription).localizedDescription
+        }
+    }
+
+    private func restyleEditingDocument() {
+        guard isEditingContent, let document = document(in: editingPane) else { return }
+        applyDocumentSource(draftText, in: editingPane, existing: document)
+    }
+
+    private func applyDocumentSource(_ source: String, in pane: ReaderPane, existing: ReaderDocument? = nil) {
+        guard let document = existing ?? document(in: pane) else { return }
+        let updated = documentLoader.restyle(document, source: source, preferences: preferences, palette: palette)
+        if pane == .primary {
+            currentDocument = updated
+        } else {
+            comparisonDocument = updated
+        }
+    }
+
+    private func findHaystack() -> String? {
+        if isEditingContent, editingPane == findPane {
+            return draftText
+        }
+        return document(in: findPane)?.displayText
+    }
+
+    private func recomputeFindHits(preferLocation: Int? = nil) {
+        let query = findQuery
+        let hits: [NSRange]
+        if query.isEmpty {
+            hits = []
+        } else if let text = findHaystack() {
+            hits = TextSearch.matches(in: text, query: query, matchCase: findMatchCase)
+        } else {
+            hits = []
+        }
+        findHits = hits
+        if hits.isEmpty {
+            findIndex = 0
+            publishFindHighlight()
+            return
+        }
+        let target = preferLocation ?? readingOffset(in: findPane)
+        findIndex = preferLocation == nil
+            ? TextSearch.index(nearestTo: target, in: hits)
+            : TextSearch.index(atOrAfter: target, in: hits)
+        revealCurrentFindHit()
+    }
+
+    private func revealCurrentFindHit() {
+        publishFindHighlight()
+        guard findHits.indices.contains(findIndex) else { return }
+        let offset = findHits[findIndex].location
+        if findPane == .primary {
+            requestLocation(offset)
+        } else {
+            requestComparisonLocation(offset)
+        }
+        updateReadingOffset(offset, in: findPane)
+        focusPane(findPane)
+    }
+
+    private func publishFindHighlight() {
+        guard findBarPresented, findHits.indices.contains(findIndex) else {
+            findHighlight = .none
+            return
+        }
+        let current = findHits[findIndex]
+        let start = max(0, findIndex - 40)
+        let end = min(findHits.count, findIndex + 41)
+        let neighbors = Array(findHits[start..<end].filter { $0 != current })
+        findHighlight = SearchHighlightRequest(current: current, neighbors: neighbors)
+    }
+
+    private func refreshFindHitsIfNeeded() {
+        guard findBarPresented else { return }
+        if document(in: findPane) == nil {
+            dismissFindBar()
+            return
+        }
+        scheduleFindSearch(immediate: true)
+    }
+
     @discardableResult
     func moveDocument(by delta: Int, in pane: ReaderPane? = nil) -> Bool {
         let pane = pane ?? activeReaderPane
@@ -699,6 +1009,93 @@ final class ReaderStore {
         let savedID = UserDefaults.standard.string(forKey: Keys.activeLibraryID)
         let library = libraries.first(where: { $0.id == savedID }) ?? libraries[0]
         await activateLibrary(library)
+    }
+
+    private func openExternalFile(_ url: URL) async {
+        let fileURL = url.resolvingSymlinksInPath().standardizedFileURL
+        guard fileURL.isFileURL else { return }
+        let accessed = fileURL.startAccessingSecurityScopedResource()
+        if accessed {
+            bookmarkStore.access(fileURL)
+        }
+
+        guard Self.isSupportedDocument(fileURL) else {
+            errorMessage = "竹点阅读只打开 TXT 与 Markdown 文件。"
+            return
+        }
+
+        let folder = fileURL.deletingLastPathComponent()
+        if let libraryID = owningLibraryID(for: fileURL),
+           let library = libraries.first(where: { $0.id == libraryID }) {
+            await presentLibrary(library, opening: fileURL)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        do {
+            let accessibleFolder = try bookmarkStore.rememberAndAccess(folder)
+            let source = Self.librarySource(accessibleFolder)
+            if !libraries.contains(where: { $0.id == source.id }) {
+                libraries.append(source)
+            }
+            await presentLibrary(source, opening: fileURL)
+        } catch {
+            await presentStandaloneFile(fileURL, folder: folder)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func presentLibrary(_ library: LibrarySource, opening fileURL: URL) async {
+        await finishEditing()
+        bookmarkStore.access(library.url)
+        bookmarkStore.access(fileURL)
+        if comparisonDocument != nil || isPickingComparison {
+            tearDownComparison()
+        }
+        activeLibraryID = library.id
+        primaryLibraryID = library.id
+        UserDefaults.standard.set(library.id, forKey: Keys.activeLibraryID)
+        renamingNodeID = nil
+        if libraryNodeCache[library.id] == nil {
+            await scanLibrary(library, restoreDocument: nil, shouldOpen: false)
+        }
+        if (libraryNodeCache[library.id] ?? []).isEmpty {
+            let node = LibraryNode(
+                id: fileURL.path,
+                name: fileURL.deletingPathExtension().lastPathComponent,
+                url: fileURL,
+                kind: .document,
+                children: []
+            )
+            publishSidebarNodes([node], for: library.id)
+        } else {
+            publishSidebarNodes(libraryNodeCache[library.id] ?? [], for: library.id)
+        }
+        await loadDocument(at: fileURL, libraryID: library.id)
+        expandAncestors(of: fileURL)
+    }
+
+    private func presentStandaloneFile(_ fileURL: URL, folder: URL) async {
+        await finishEditing()
+        if comparisonDocument != nil || isPickingComparison {
+            tearDownComparison()
+        }
+        let source = Self.librarySource(folder)
+        if !libraries.contains(where: { $0.id == source.id }) {
+            libraries.append(source)
+        }
+        let node = LibraryNode(
+            id: fileURL.path,
+            name: fileURL.deletingPathExtension().lastPathComponent,
+            url: fileURL,
+            kind: .document,
+            children: []
+        )
+        publishSidebarNodes([node], for: source.id)
+        activeLibraryID = source.id
+        primaryLibraryID = source.id
+        renamingNodeID = nil
+        await loadDocument(at: fileURL, libraryID: source.id)
     }
 
     private func installLibrary(_ url: URL) async {
@@ -814,6 +1211,9 @@ final class ReaderStore {
             let offset = min(progressByPath[document.id]?.characterOffset ?? 0, document.characterCount)
             readingOffset = offset
             requestLocation(offset)
+            if findPane == .primary {
+                refreshFindHitsIfNeeded()
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -847,6 +1247,9 @@ final class ReaderStore {
             lastDocumentByLibrary[targetLibraryID] = document.id
             persistLastDocuments()
             focusPane(.comparison)
+            if findPane == .comparison {
+                refreshFindHitsIfNeeded()
+            }
         } catch {
             isLoadingComparison = false
             if comparisonDocument == nil {
@@ -1098,6 +1501,24 @@ final class ReaderStore {
         )
     }
 
+    private static let supportedDocumentExtensions: Set<String> = [
+        "txt", "text", "md", "markdown", "mdown", "mdwn"
+    ]
+
+    private static var supportedDocumentTypes: [UTType] {
+        var types: [UTType] = [.plainText]
+        for ext in ["md", "markdown", "mdown", "txt"] {
+            if let type = UTType(filenameExtension: ext), !types.contains(type) {
+                types.append(type)
+            }
+        }
+        return types
+    }
+
+    private static func isSupportedDocument(_ url: URL) -> Bool {
+        supportedDocumentExtensions.contains(url.pathExtension.lowercased())
+    }
+
     private func migrateLegacyLastDocumentIfNeeded() {
         guard lastDocumentByLibrary.isEmpty,
               let path = UserDefaults.standard.string(forKey: Keys.lastDocumentPath),
@@ -1259,4 +1680,33 @@ final class ReaderStore {
 struct ReadingLocationRequest: Equatable {
     let id = UUID()
     let offset: Int
+}
+
+struct SearchHighlightRequest: Equatable {
+    let id: UUID
+    var current: NSRange?
+    var neighbors: [NSRange]
+
+    static let none = SearchHighlightRequest(
+        id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+        current: nil,
+        neighbors: []
+    )
+
+    init(current: NSRange? = nil, neighbors: [NSRange] = []) {
+        self.id = UUID()
+        self.current = current
+        self.neighbors = neighbors
+    }
+
+    private init(id: UUID, current: NSRange?, neighbors: [NSRange]) {
+        self.id = id
+        self.current = current
+        self.neighbors = neighbors
+    }
+}
+
+struct FindJumpItem: Equatable {
+    let index: Int
+    let snippet: String
 }

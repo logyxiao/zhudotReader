@@ -1,7 +1,7 @@
 import Foundation
 
 actor LibraryScanner {
-    private let supportedExtensions: Set<String> = ["txt", "md"]
+    private let supportedExtensions: Set<String> = ["txt", "text", "md", "markdown", "mdown", "mdwn"]
     private let resourceKeys: Set<URLResourceKey> = [
         .isDirectoryKey,
         .isRegularFileKey,

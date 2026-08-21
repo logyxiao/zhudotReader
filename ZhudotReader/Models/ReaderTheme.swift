@@ -62,6 +62,14 @@ struct ReaderPalette: Equatable {
     var nsAccent: NSColor { NSColor(accentDeep) }
     var nsScrollerKnob: NSColor { nsMuted.withAlphaComponent(0.34) }
     var nsScrollerKnobActive: NSColor { nsMuted.withAlphaComponent(0.55) }
+    var nsFindWash: NSColor {
+        NSColor(text).blended(withFraction: 0.82, of: NSColor(accent))?.withAlphaComponent(0.28)
+            ?? NSColor.systemYellow.withAlphaComponent(0.28)
+    }
+    var nsFindCurrent: NSColor {
+        NSColor(accent).blended(withFraction: 0.35, of: NSColor.systemYellow)?.withAlphaComponent(0.52)
+            ?? NSColor.systemYellow.withAlphaComponent(0.5)
+    }
 }
 
 extension Color {

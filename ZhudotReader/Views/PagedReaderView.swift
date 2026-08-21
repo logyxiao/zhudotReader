@@ -7,6 +7,7 @@ struct PagedReaderView: View {
     let palette: ReaderPalette
     let locationRequest: ReadingLocationRequest
     let keyboardRequest: ReaderKeyboardRequest?
+    let searchHighlight: SearchHighlightRequest
     let onProgress: (Int) -> Void
     var onDoubleClick: (() -> Void)? = nil
     var onActivate: (() -> Void)? = nil
@@ -20,6 +21,7 @@ struct PagedReaderView: View {
             let key = PageLayoutKey(
                 documentID: document.id,
                 contentLength: document.attributedText.length,
+                contentFingerprint: document.contentFingerprint,
                 width: rounded(geometry.size.width),
                 height: rounded(geometry.size.height),
                 spread: spread,
@@ -76,6 +78,11 @@ struct PagedReaderView: View {
             .onChange(of: locationRequest) { _, request in
                 locate(request.offset, spread: spread)
             }
+            .onChange(of: searchHighlight) { _, highlight in
+                if let current = highlight.current {
+                    locate(current.location, spread: spread)
+                }
+            }
             .onChange(of: keyboardRequest) { _, request in
                 guard let request else { return }
                 if request.action == .viewportBackward {
@@ -93,6 +100,10 @@ struct PagedReaderView: View {
             StaticPageTextView(
                 attributedText: document.attributedText.attributedSubstring(from: pages[index]),
                 backgroundColor: palette.nsPaper,
+                washColor: palette.nsFindWash,
+                activeColor: palette.nsFindCurrent,
+                currentRange: relative(searchHighlight.current, in: pages[index]),
+                neighborRanges: searchHighlight.neighbors.compactMap { relative($0, in: pages[index]) },
                 onDoubleClick: onDoubleClick,
                 onActivate: onActivate
             )
@@ -126,6 +137,13 @@ struct PagedReaderView: View {
         pageIndex = max(0, found - found % spread)
     }
 
+    private func relative(_ range: NSRange?, in page: NSRange) -> NSRange? {
+        guard let range else { return nil }
+        let intersection = NSIntersectionRange(range, page)
+        guard intersection.length > 0 else { return nil }
+        return NSRange(location: intersection.location - page.location, length: intersection.length)
+    }
+
     private func turn(by amount: Int, spread: Int) {
         guard !pages.isEmpty else { return }
         let next = min(max(0, pageIndex + amount), max(0, pages.count - 1))
@@ -151,6 +169,7 @@ struct PagedReaderView: View {
 private struct PageLayoutKey: Hashable {
     let documentID: String
     let contentLength: Int
+    let contentFingerprint: Int
     let width: Int
     let height: Int
     let spread: Int
@@ -186,6 +205,10 @@ private enum TextPaginator {
 private struct StaticPageTextView: NSViewRepresentable {
     let attributedText: NSAttributedString
     let backgroundColor: NSColor
+    let washColor: NSColor
+    let activeColor: NSColor
+    let currentRange: NSRange?
+    let neighborRanges: [NSRange]
     var onDoubleClick: (() -> Void)? = nil
     var onActivate: (() -> Void)? = nil
 
@@ -212,5 +235,11 @@ private struct StaticPageTextView: NSViewRepresentable {
         if !textView.attributedString().isEqual(to: attributedText) {
             textView.textStorage?.setAttributedString(attributedText)
         }
+        textView.applySearchHighlights(
+            current: currentRange,
+            neighbors: neighborRanges,
+            wash: washColor,
+            active: activeColor
+        )
     }
 }

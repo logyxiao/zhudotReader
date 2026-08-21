@@ -7,12 +7,13 @@ struct ScrollReaderView: NSViewRepresentable {
     let palette: ReaderPalette
     let locationRequest: ReadingLocationRequest
     let keyboardRequest: ReaderKeyboardRequest?
+    let searchHighlight: SearchHighlightRequest
     let onProgress: (Int) -> Void
     var onDoubleClick: (() -> Void)? = nil
     var onActivate: (() -> Void)? = nil
 
     private var styleSignature: String {
-        "\(preferences.theme.rawValue)-\(preferences.fontFamily.rawValue)-\(preferences.fontSize)-\(preferences.lineHeight.rawValue)-\(preferences.pageMargin)"
+        "\(preferences.theme.rawValue)-\(preferences.fontFamily.rawValue)-\(preferences.fontSize)-\(preferences.lineHeight.rawValue)-\(preferences.pageMargin)-\(document.contentFingerprint)"
     }
 
     func makeCoordinator() -> Coordinator {
@@ -60,14 +61,16 @@ struct ScrollReaderView: NSViewRepresentable {
         textView.backgroundColor = palette.nsPaper
         textView.textContainerInset = NSSize(width: preferences.pageMargin, height: 34)
 
-        if context.coordinator.documentID != document.id ||
-            context.coordinator.styleSignature != styleSignature {
+            if context.coordinator.documentID != document.id ||
+                context.coordinator.styleSignature != styleSignature {
             context.coordinator.isRestoring = true
             textView.textStorage?.setAttributedString(document.attributedText)
             context.coordinator.documentID = document.id
             context.coordinator.styleSignature = styleSignature
+            context.coordinator.highlightID = searchHighlight.id
             DispatchQueue.main.async {
                 context.coordinator.restore(locationRequest.offset)
+                context.coordinator.apply(searchHighlight, palette: palette)
             }
         } else if context.coordinator.locationRequestID != locationRequest.id {
             context.coordinator.restore(locationRequest.offset)
@@ -79,6 +82,11 @@ struct ScrollReaderView: NSViewRepresentable {
             if let action = keyboardRequest?.action {
                 context.coordinator.handle(action)
             }
+        }
+
+        if context.coordinator.highlightID != searchHighlight.id {
+            context.coordinator.highlightID = searchHighlight.id
+            context.coordinator.apply(searchHighlight, palette: palette)
         }
     }
 
@@ -93,6 +101,7 @@ struct ScrollReaderView: NSViewRepresentable {
         var styleSignature: String?
         var locationRequestID: UUID?
         var keyboardRequestID: UUID?
+        var highlightID: UUID?
         var onProgress: (Int) -> Void
         var isRestoring = false
         var lineScrollDistance: CGFloat = 35
@@ -136,6 +145,15 @@ struct ScrollReaderView: NSViewRepresentable {
             case .lineForward: distance = lineScrollDistance
             }
             scroll(by: distance)
+        }
+
+        func apply(_ highlight: SearchHighlightRequest, palette: ReaderPalette) {
+            textView?.applySearchHighlights(
+                current: highlight.current,
+                neighbors: highlight.neighbors,
+                wash: palette.nsFindWash,
+                active: palette.nsFindCurrent
+            )
         }
 
         private func scroll(by distance: CGFloat) {
@@ -223,5 +241,37 @@ extension NSScrollView {
         scroller.scrollerStyle = .overlay
         scroller.apply(palette)
         verticalScroller = scroller
+    }
+}
+
+extension NSTextView {
+    func applySearchHighlights(
+        current: NSRange?,
+        neighbors: [NSRange],
+        wash: NSColor,
+        active: NSColor
+    ) {
+        let length = (string as NSString).length
+        let full = NSRange(location: 0, length: length)
+        layoutManager?.removeTemporaryAttribute(.backgroundColor, forCharacterRange: full)
+        guard length > 0 else { return }
+
+        func clamped(_ range: NSRange) -> NSRange? {
+            guard range.location < length else { return nil }
+            let length = min(range.length, length - range.location)
+            guard length > 0 else { return nil }
+            return NSRange(location: range.location, length: length)
+        }
+
+        for range in neighbors {
+            if let range = clamped(range) {
+                layoutManager?.addTemporaryAttribute(.backgroundColor, value: wash, forCharacterRange: range)
+            }
+        }
+        if let current, let range = clamped(current) {
+            layoutManager?.addTemporaryAttribute(.backgroundColor, value: active, forCharacterRange: range)
+            setSelectedRange(range)
+            scrollRangeToVisible(range)
+        }
     }
 }

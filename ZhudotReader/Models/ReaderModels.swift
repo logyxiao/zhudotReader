@@ -46,6 +46,7 @@ struct ReaderDocument: Identifiable, @unchecked Sendable {
     let attributedText: NSAttributedString
     let chapters: [Chapter]
     let characterCount: Int
+    let contentFingerprint: Int
 }
 
 enum ReaderMode: String, Codable, CaseIterable, Identifiable, Sendable {

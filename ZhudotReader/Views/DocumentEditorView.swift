@@ -6,6 +6,8 @@ struct DocumentEditorView: NSViewRepresentable {
     let text: String
     let preferences: ReaderPreferences
     let palette: ReaderPalette
+    let draftEpoch: Int
+    let searchHighlight: SearchHighlightRequest
     let onTextChange: (String) -> Void
     let onExit: () -> Void
 
@@ -22,7 +24,8 @@ struct DocumentEditorView: NSViewRepresentable {
         textView.isSelectable = true
         textView.isRichText = false
         textView.allowsUndo = true
-        textView.usesFindBar = true
+        textView.usesFindBar = false
+        textView.usesFindPanel = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
@@ -66,12 +69,29 @@ struct DocumentEditorView: NSViewRepresentable {
 
         if context.coordinator.documentID != documentID {
             context.coordinator.documentID = documentID
+            context.coordinator.draftEpoch = draftEpoch
+            context.coordinator.highlightID = searchHighlight.id
             context.coordinator.isApplying = true
             textView.string = text
             context.coordinator.isApplying = false
             DispatchQueue.main.async {
                 textView.window?.makeFirstResponder(textView)
+                context.coordinator.apply(searchHighlight, palette: palette)
             }
+        } else if context.coordinator.draftEpoch != draftEpoch {
+            context.coordinator.draftEpoch = draftEpoch
+            context.coordinator.highlightID = searchHighlight.id
+            let selected = textView.selectedRange()
+            context.coordinator.isApplying = true
+            textView.string = text
+            context.coordinator.isApplying = false
+            if NSMaxRange(selected) <= (text as NSString).length {
+                textView.setSelectedRange(selected)
+            }
+            context.coordinator.apply(searchHighlight, palette: palette)
+        } else if context.coordinator.highlightID != searchHighlight.id {
+            context.coordinator.highlightID = searchHighlight.id
+            context.coordinator.apply(searchHighlight, palette: palette)
         }
     }
 
@@ -79,6 +99,8 @@ struct DocumentEditorView: NSViewRepresentable {
         weak var textView: EditorTextView?
         weak var scrollView: NSScrollView?
         var documentID: String?
+        var draftEpoch = 0
+        var highlightID: UUID?
         var isApplying = false
         var onTextChange: (String) -> Void
         var onExit: () -> Void
@@ -86,6 +108,15 @@ struct DocumentEditorView: NSViewRepresentable {
         init(onTextChange: @escaping (String) -> Void, onExit: @escaping () -> Void) {
             self.onTextChange = onTextChange
             self.onExit = onExit
+        }
+
+        func apply(_ highlight: SearchHighlightRequest, palette: ReaderPalette) {
+            textView?.applySearchHighlights(
+                current: highlight.current,
+                neighbors: highlight.neighbors,
+                wash: palette.nsFindWash,
+                active: palette.nsFindCurrent
+            )
         }
 
         func textDidChange(_ notification: Notification) {

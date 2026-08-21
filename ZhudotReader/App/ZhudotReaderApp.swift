@@ -1,19 +1,27 @@
+import AppKit
 import SwiftUI
 
 @main
 struct ZhudotReaderApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var store = ReaderStore()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environment(store)
+                .onAppear { IncomingDocuments.attach(store) }
+                .onOpenURL { store.openIncomingURL($0) }
         .frame(minWidth: store.showsComparisonLayout ? 1180 : 900, minHeight: 620)
         }
         .defaultSize(width: 1280, height: 820)
         .windowToolbarStyle(.unifiedCompact)
         .commands {
             CommandGroup(replacing: .newItem) {
+                Button("打开文稿…") {
+                    store.chooseDocuments()
+                }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
                 Button("新建 TXT 文件") {
                     store.createDocument(format: .text)
                 }
@@ -41,6 +49,37 @@ struct ZhudotReaderApp: App {
                 }
                 .keyboardShortcut("s")
                 .disabled(!store.isEditingContent)
+            }
+            CommandGroup(after: .pasteboard) {
+                Button("查找…") {
+                    store.presentFindBar()
+                }
+                .keyboardShortcut("f")
+                .disabled(store.activeReadingDocument == nil)
+                Button("查找与替换…") {
+                    store.presentFindBar(showsReplace: true)
+                }
+                .keyboardShortcut("f", modifiers: [.command, .option])
+                .disabled(store.activeReadingDocument == nil)
+                Button("查找下一个") {
+                    store.advanceFind(by: 1)
+                }
+                .keyboardShortcut("g")
+                .disabled(store.activeReadingDocument == nil)
+                Button("查找上一个") {
+                    store.advanceFind(by: -1)
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+                .disabled(store.activeReadingDocument == nil)
+                Divider()
+                Button("替换") {
+                    store.replaceCurrentFind()
+                }
+                .disabled(!store.findBarPresented || store.findHits.isEmpty)
+                Button("全部替换") {
+                    store.replaceAllFind()
+                }
+                .disabled(!store.findBarPresented || store.findQuery.isEmpty)
             }
             CommandMenu("阅读") {
                 Button("对照阅读") {
@@ -80,5 +119,49 @@ struct ZhudotReaderApp: App {
                 .disabled(store.isEditingContent)
             }
         }
+    }
+}
+
+@MainActor
+enum IncomingDocuments {
+    private static weak var store: ReaderStore?
+    private static var pending: [URL] = []
+
+    static func attach(_ store: ReaderStore) {
+        self.store = store
+        let urls = pending
+        pending = []
+        if !urls.isEmpty {
+            store.openIncomingURLs(urls)
+        }
+    }
+
+    static func deliver(_ urls: [URL]) {
+        let files = urls.filter(\.isFileURL)
+        guard !files.isEmpty else { return }
+        if let store {
+            store.openIncomingURLs(files)
+        } else {
+            pending.append(contentsOf: files)
+        }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {
+        Task { @MainActor in
+            IncomingDocuments.deliver(urls)
+        }
+    }
+
+    func application(_ sender: NSApplication, openFile filename: String) -> Bool {
+        Task { @MainActor in
+            IncomingDocuments.deliver([URL(fileURLWithPath: filename)])
+        }
+        return true
+    }
+
+    func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        false
     }
 }
