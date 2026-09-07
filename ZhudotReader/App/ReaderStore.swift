@@ -26,6 +26,32 @@ final class ReaderStore {
         let preferences: ReaderPreferences
     }
 
+    let lanSync = LANReadingSync()
+
+    func startLANSync() {
+        guard let shared = activeReadingDocument, !isEditingContent else { return }
+        let documentID = shared.id
+        lanSync.start(snapshot: { [weak self] in
+            guard let self, let pane = self.paneDisplayingDocument(documentID),
+                  let document = self.document(in: pane) else { return nil }
+            return ["title": document.title, "text": document.displayText,
+                    "version": String(document.contentFingerprint),
+                    "count": document.characterCount, "offset": self.readingOffset(in: pane),
+                    "chapters": document.chapters.map { ["title": $0.title, "offset": $0.offset] as [String: Any] }]
+        }, progress: { [weak self] offset in
+            guard let self, let pane = self.paneDisplayingDocument(documentID), !self.isEditingContent else { return }
+            if pane == .primary { self.requestLocation(offset) }
+            else { self.requestComparisonLocation(offset) }
+            self.updateReadingOffset(offset, in: pane)
+        })
+    }
+
+    private func paneDisplayingDocument(_ id: String) -> ReaderPane? {
+        if currentDocument?.id == id { return .primary }
+        if comparisonDocument?.id == id { return .comparison }
+        return nil
+    }
+
     var libraries: [LibrarySource] = []
     var activeLibraryID: String?
     var primaryLibraryID: String?
@@ -49,6 +75,7 @@ final class ReaderStore {
     var noticeMessage: String?
     var exportedWordURL: URL?
     var isExportingWord = false
+    var pendingTrashNode: LibraryNode?
     var columnVisibility: NavigationSplitViewVisibility = .all
     var readingOffset = 0
     var locationRequest = ReadingLocationRequest(offset: 0)
@@ -790,6 +817,17 @@ final class ReaderStore {
     }
 
     func trashNode(_ node: LibraryNode) {
+        let preferredDocumentPath = replacementDocumentPath(
+            for: currentDocument?.id,
+            removing: node,
+            in: nodes(for: .primary)
+        )
+        let preferredComparisonPath = replacementDocumentPath(
+            for: comparisonDocument?.id,
+            removing: node,
+            in: nodes(for: .comparison)
+        )
+
         Task {
             do {
                 try validateManagedURL(node.url)
@@ -797,13 +835,35 @@ final class ReaderStore {
                 try FileManager.default.trashItem(at: node.url, resultingItemURL: &trashedURL)
                 removeState(forPathPrefix: node.id)
                 await reloadAfterFileOperation(
-                    preferredDocumentPath: currentDocument?.id,
-                    preferredComparisonPath: comparisonDocument?.id
+                    preferredDocumentPath: preferredDocumentPath,
+                    preferredComparisonPath: preferredComparisonPath
                 )
             } catch {
                 errorMessage = ReaderError.fileOperationFailed(error.localizedDescription).localizedDescription
             }
         }
+    }
+
+    func requestTrash(_ node: LibraryNode) {
+        pendingTrashNode = node
+    }
+
+    func requestTrashActiveDocument() {
+        guard !isEditingContent,
+              let document = activeReadingDocument,
+              let node = findNode(path: document.id, in: nodes(for: activeReaderPane)),
+              node.kind == .document else { return }
+        requestTrash(node)
+    }
+
+    func confirmPendingTrash() {
+        guard let node = pendingTrashNode else { return }
+        pendingTrashNode = nil
+        trashNode(node)
+    }
+
+    func cancelPendingTrash() {
+        pendingTrashNode = nil
     }
 
     func updateReadingOffset(_ offset: Int) {
@@ -1854,6 +1914,32 @@ final class ReaderStore {
         nodes.flatMap { node in
             node.kind == .document ? [node] : flattenedDocuments(in: node.children)
         }
+    }
+
+    private func replacementDocumentPath(
+        for currentPath: String?,
+        removing node: LibraryNode,
+        in nodes: [LibraryNode]
+    ) -> String? {
+        guard let currentPath else { return nil }
+        let removesCurrent = currentPath == node.id || currentPath.hasPrefix(node.id + "/")
+        guard removesCurrent else { return currentPath }
+
+        let documents = flattenedDocuments(in: nodes)
+        let removedIndexes = documents.indices.filter { index in
+            let path = documents[index].id
+            return path == node.id || path.hasPrefix(node.id + "/")
+        }
+        guard let firstRemoved = removedIndexes.first,
+              let lastRemoved = removedIndexes.last else { return nil }
+
+        let nextIndex = lastRemoved + 1
+        if documents.indices.contains(nextIndex) {
+            return documents[nextIndex].id
+        }
+
+        let previousIndex = firstRemoved - 1
+        return documents.indices.contains(previousIndex) ? documents[previousIndex].id : nil
     }
 
     private func finishEditing() async {

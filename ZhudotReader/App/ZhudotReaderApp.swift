@@ -106,6 +106,11 @@ struct ZhudotReaderApp: App {
                 Button("转成 Word") { store.exportActiveDocumentToWord() }
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                     .disabled(store.activeReadingDocument == nil || store.isExportingWord)
+                Button("将当前文件移到废纸篓…") {
+                    store.requestTrashActiveDocument()
+                }
+                .keyboardShortcut(.delete, modifiers: [])
+                .disabled(store.activeReadingDocument == nil || store.isEditingContent)
                 Divider()
                 Button("上一章节") { store.moveChapter(by: -1) }
                     .keyboardShortcut("[", modifiers: .command)

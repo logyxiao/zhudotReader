@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>允许同一局域网中的手机扫码阅读当前书籍并同步阅读位置。</string>
 	<key>CFBundleDisplayName</key>
 	<string>竹点阅读</string>
 	<key>CFBundleExecutable</key>

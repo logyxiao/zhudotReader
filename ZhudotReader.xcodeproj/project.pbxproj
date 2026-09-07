@@ -27,6 +27,8 @@
 				AA0000000000000000000113 /* FindBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000216 /* FindBarView.swift */; };
 				AA0000000000000000000114 /* TextSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000217 /* TextSearch.swift */; };
 				AA0000000000000000000110 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000213 /* Assets.xcassets */; };
+		AA0000000000000000000118 = {isa = PBXBuildFile; fileRef = AA0000000000000000000218; };
+		AA0000000000000000000119 = {isa = PBXBuildFile; fileRef = AA0000000000000000000219; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -53,6 +55,8 @@
 				AA0000000000000000000215 /* WordDocumentExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordDocumentExporter.swift; sourceTree = "<group>"; };
 				AA0000000000000000000216 /* FindBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBarView.swift; sourceTree = "<group>"; };
 				AA0000000000000000000217 /* TextSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextSearch.swift; sourceTree = "<group>"; };
+		AA0000000000000000000218 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LANReadingSync.swift; sourceTree = "<group>"; };
+		AA0000000000000000000219 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LANSyncView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -109,6 +113,7 @@
 		AA0000000000000000000705 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+                AA0000000000000000000218,
 				AA0000000000000000000205 /* SecurityScopedBookmarkStore.swift */,
 				AA0000000000000000000206 /* LibraryScanner.swift */,
 				AA0000000000000000000207 /* TextDecoder.swift */,
@@ -123,6 +128,7 @@
 		AA0000000000000000000706 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+                AA0000000000000000000219,
 				AA000000000000000000020A /* ContentView.swift */,
 				AA000000000000000000020B /* SidebarView.swift */,
 				AA000000000000000000020C /* ReaderView.swift */,
@@ -213,6 +219,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+                AA0000000000000000000119,
+                AA0000000000000000000118,
 				AA0000000000000000000101 /* ZhudotReaderApp.swift in Sources */,
 				AA0000000000000000000102 /* ReaderStore.swift in Sources */,
 				AA0000000000000000000103 /* ReaderModels.swift in Sources */,

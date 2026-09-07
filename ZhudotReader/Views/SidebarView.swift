@@ -3,10 +3,17 @@ import UniformTypeIdentifiers
 
 struct SidebarView: View {
     @Environment(ReaderStore.self) private var store
+    @State private var fileSearchQuery = ""
+    @FocusState private var fileSearchFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
             libraryHeader
+
+            if store.libraryRootURL != nil {
+                fileSearchField
+            }
+
             Divider()
 
             if store.libraryRootURL == nil {
@@ -20,6 +27,9 @@ struct SidebarView: View {
         }
         .background(store.palette.sidebar)
         .foregroundStyle(store.palette.text)
+        .onChange(of: store.activeLibraryID) { _, _ in
+            fileSearchQuery = ""
+        }
     }
 
     @ViewBuilder
@@ -28,13 +38,21 @@ struct SidebarView: View {
            let primaryID = store.primaryLibraryID,
            let comparisonID = store.comparisonLibraryID {
             ZStack {
-                LibraryOutlineList(libraryID: primaryID, nodes: store.libraryNodes)
+                LibraryOutlineList(
+                    libraryID: primaryID,
+                    nodes: store.libraryNodes,
+                    searchQuery: fileSearchQuery
+                )
                     .opacity(store.activeReaderPane == .primary ? 1 : 0)
                     .allowsHitTesting(store.activeReaderPane == .primary)
                     .accessibilityHidden(store.activeReaderPane != .primary)
                     .id("primary-\(primaryID)")
 
-                LibraryOutlineList(libraryID: comparisonID, nodes: store.comparisonSidebarNodes)
+                LibraryOutlineList(
+                    libraryID: comparisonID,
+                    nodes: store.comparisonSidebarNodes,
+                    searchQuery: fileSearchQuery
+                )
                     .opacity(store.activeReaderPane == .comparison ? 1 : 0)
                     .allowsHitTesting(store.activeReaderPane == .comparison)
                     .accessibilityHidden(store.activeReaderPane != .comparison)
@@ -44,9 +62,53 @@ struct SidebarView: View {
         } else {
             LibraryOutlineList(
                 libraryID: store.activeLibraryID ?? "",
-                nodes: store.focusedSidebarNodes
+                nodes: store.focusedSidebarNodes,
+                searchQuery: fileSearchQuery
             )
         }
+    }
+
+    private var fileSearchField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(fileSearchFocused ? store.palette.accentDeep : store.palette.faint)
+
+            TextField("搜索文件", text: $fileSearchQuery)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11))
+                .focused($fileSearchFocused)
+                .onExitCommand {
+                    if fileSearchQuery.isEmpty {
+                        fileSearchFocused = false
+                    } else {
+                        fileSearchQuery = ""
+                    }
+                }
+
+            if !fileSearchQuery.isEmpty {
+                Button {
+                    fileSearchQuery = ""
+                    fileSearchFocused = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(store.palette.faint)
+                }
+                .buttonStyle(.plain)
+                .help("清除搜索")
+            }
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 28)
+        .background(store.palette.sidebarStrong)
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay {
+            RoundedRectangle(cornerRadius: 5)
+                .stroke(fileSearchFocused ? store.palette.accent.opacity(0.65) : store.palette.border, lineWidth: 1)
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 9)
     }
 
     private var libraryHeader: some View {
@@ -159,9 +221,18 @@ private struct LibraryOutlineList: View {
     @Environment(ReaderStore.self) private var store
     let libraryID: String
     let nodes: [LibraryNode]
+    let searchQuery: String
     @State private var rootDropTargeted = false
 
     var body: some View {
+        if normalizedQuery.isEmpty {
+            outlineList
+        } else {
+            searchResultsList
+        }
+    }
+
+    private var outlineList: some View {
         List {
             ForEach(nodes) { node in
                 LibraryTreeNodeView(node: node, libraryID: libraryID)
@@ -188,6 +259,42 @@ private struct LibraryOutlineList: View {
         }
     }
 
+    private var searchResultsList: some View {
+        List {
+            ForEach(searchResults) { result in
+                LibrarySearchResultRow(result: result)
+                    .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+                    .listRowBackground(Color.clear)
+            }
+        }
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .overlay {
+            if searchResults.isEmpty, !store.isLoading {
+                VStack(spacing: 8) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 20, weight: .light))
+                        .foregroundStyle(store.palette.faint)
+                    Text("没有找到文件")
+                        .font(.custom("Songti SC", size: 12).weight(.semibold))
+                    Text("试试文件名或所在文件夹")
+                        .font(.system(size: 10))
+                        .foregroundStyle(store.palette.faint)
+                }
+                .padding(16)
+            }
+        }
+    }
+
+    private var normalizedQuery: String {
+        searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var searchResults: [LibrarySearchResult] {
+        guard !normalizedQuery.isEmpty else { return [] }
+        return LibrarySearchResult.matches(in: nodes, query: normalizedQuery)
+    }
+
     private var emptyLibraryHint: some View {
         VStack(spacing: 10) {
             Text("书库是空的")
@@ -206,11 +313,119 @@ private struct LibraryOutlineList: View {
     }
 }
 
+private struct LibrarySearchResult: Identifiable {
+    let node: LibraryNode
+    let folderPath: String
+
+    var id: String { node.id }
+
+    static func matches(in nodes: [LibraryNode], query: String) -> [LibrarySearchResult] {
+        var matches: [LibrarySearchResult] = []
+
+        func visit(_ nodes: [LibraryNode], path: [String]) {
+            for node in nodes {
+                if node.kind == .folder {
+                    visit(node.children, path: path + [node.name])
+                    continue
+                }
+
+                let folderPath = path.joined(separator: " / ")
+                let searchableText = [node.name, node.url.lastPathComponent, folderPath]
+                    .joined(separator: " ")
+                if searchableText.range(
+                    of: query,
+                    options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive]
+                ) != nil {
+                    matches.append(LibrarySearchResult(node: node, folderPath: folderPath))
+                }
+            }
+        }
+
+        visit(nodes, path: [])
+        return matches
+    }
+}
+
+private struct LibrarySearchResultRow: View {
+    @Environment(ReaderStore.self) private var store
+    let result: LibrarySearchResult
+
+    var body: some View {
+        Button {
+            if NSEvent.modifierFlags.contains(.option) {
+                store.openComparisonDocument(result.node)
+            } else {
+                store.openDocument(result.node)
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: result.node.url.pathExtension.lowercased() == "md" ? "text.document" : "doc.text")
+                    .font(.system(size: 11))
+                    .foregroundStyle(isOpen ? store.palette.accentDeep : store.palette.faint)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(result.node.name)
+                        .font(.custom("Songti SC", size: 11))
+                        .lineLimit(1)
+                    Text(result.folderPath.isEmpty ? "书库根目录" : result.folderPath)
+                        .font(.system(size: 8))
+                        .foregroundStyle(store.palette.faint)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 4)
+
+                Text(result.node.url.pathExtension.uppercased())
+                    .font(.system(size: 7, design: .monospaced))
+                    .foregroundStyle(store.palette.faint)
+            }
+            .padding(.horizontal, 6)
+            .frame(maxWidth: .infinity, minHeight: 34)
+            .contentShape(Rectangle())
+            .background {
+                if store.selectedDocumentID == result.node.id {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(store.palette.accentSoft)
+                } else if store.comparisonDocument?.id == result.node.id {
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(store.palette.accent.opacity(0.55), lineWidth: 1)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded {
+                store.openDocument(result.node, enterEdit: true)
+            }
+        )
+        .contextMenu {
+            Button("打开", systemImage: "book") {
+                store.openDocument(result.node)
+            }
+            Button("在对照栏打开", systemImage: "rectangle.split.2x1") {
+                store.openComparisonDocument(result.node)
+            }
+            Divider()
+            Button("在 Finder 中显示", systemImage: "folder") {
+                store.revealInFinder(result.node)
+            }
+            Divider()
+            Button("移到废纸篓…", systemImage: "trash", role: .destructive) {
+                store.requestTrash(result.node)
+            }
+        }
+        .help(result.node.url.path)
+    }
+
+    private var isOpen: Bool {
+        store.selectedDocumentID == result.node.id || store.comparisonDocument?.id == result.node.id
+    }
+}
+
 private struct LibraryTreeNodeView: View {
     @Environment(ReaderStore.self) private var store
     let node: LibraryNode
     var libraryID: String?
-    @State private var deleteConfirmationPresented = false
     @State private var renameValue = ""
     @State private var dropTargeted = false
     @State private var renameCancelled = false
@@ -237,7 +452,6 @@ private struct LibraryTreeNodeView: View {
                         store.moveNode(path: payload.path, libraryID: payload.libraryID, to: node.url)
                     }
                 }
-                .contextMenu { folderContextMenu }
             } else {
                 documentRow
                     .background {
@@ -260,18 +474,6 @@ private struct LibraryTreeNodeView: View {
                     }
                     .contextMenu { documentContextMenu }
             }
-        }
-        .confirmationDialog(
-            "将“\(node.name)”移到废纸篓？",
-            isPresented: $deleteConfirmationPresented,
-            titleVisibility: .visible
-        ) {
-            Button("移到废纸篓", role: .destructive) {
-                store.trashNode(node)
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text(node.kind == .folder ? "文件夹内的 \(node.documentCount) 本书也会一起移入系统废纸篓。" : "可以稍后从系统废纸篓恢复。")
         }
         .onChange(of: store.renamingNodeID) { _, id in
             if id == node.id { startInlineRename() }
@@ -465,7 +667,7 @@ private struct LibraryTreeNodeView: View {
         }
         Divider()
         Button("移到废纸篓…", systemImage: "trash", role: .destructive) {
-            deleteConfirmationPresented = true
+            store.requestTrash(node)
         }
     }
 
@@ -481,7 +683,7 @@ private struct LibraryTreeNodeView: View {
         }
         Divider()
         Button("移到废纸篓…", systemImage: "trash", role: .destructive) {
-            deleteConfirmationPresented = true
+            store.requestTrash(node)
         }
     }
 

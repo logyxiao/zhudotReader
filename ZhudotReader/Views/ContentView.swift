@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @Environment(ReaderStore.self) private var store
     @State private var settingsPresented = false
+    @State private var lanSyncPresented = false
     @State private var chaptersPresented = false
 
     var body: some View {
@@ -47,6 +48,13 @@ struct ContentView: View {
             .frame(width: 0, height: 0)
         }
         .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button { lanSyncPresented.toggle() } label: {
+                    Label("扫码同步阅读", systemImage: "qrcode")
+                }
+                .help("局域网扫码同步阅读")
+                .popover(isPresented: $lanSyncPresented) { LANSyncView() }
+            }
             ToolbarItem(placement: .principal) {
                 LibraryTabsView()
             }
@@ -166,6 +174,25 @@ struct ContentView: View {
         } message: {
             Text(store.noticeMessage ?? "")
         }
+        .confirmationDialog(
+            "将“\(store.pendingTrashNode?.name ?? "当前文件")”移到废纸篓？",
+            isPresented: trashConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("移到废纸篓", role: .destructive) {
+                store.confirmPendingTrash()
+            }
+            .keyboardShortcut(.defaultAction)
+            Button("取消", role: .cancel) {
+                store.cancelPendingTrash()
+            }
+        } message: {
+            if let node = store.pendingTrashNode, node.kind == .folder {
+                Text("文件夹内的 \(node.documentCount) 本书也会一起移入系统废纸篓。")
+            } else {
+                Text("只会移除这个文件，可以稍后从系统废纸篓恢复。")
+            }
+        }
     }
 
     private var errorPresented: Binding<Bool> {
@@ -179,6 +206,13 @@ struct ContentView: View {
         Binding(
             get: { store.noticeMessage != nil },
             set: { if !$0 { store.noticeMessage = nil } }
+        )
+    }
+
+    private var trashConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { store.pendingTrashNode != nil },
+            set: { if !$0 { store.cancelPendingTrash() } }
         )
     }
 }
