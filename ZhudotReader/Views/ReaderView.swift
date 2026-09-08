@@ -29,27 +29,9 @@ struct ReaderView: View {
             }
 
             Group {
-                if isEditing {
-                    DocumentEditorView(
-                        documentID: document.id,
-                        text: store.draftText,
-                        preferences: store.preferences,
-                        palette: store.palette,
-                        draftEpoch: store.draftEpoch,
-                        searchHighlight: store.searchHighlight(in: pane),
-                        onTextChange: store.updateDraft,
-                        onExit: {
-                            if store.findBarPresented && store.findPane == pane {
-                                store.dismissFindBar()
-                            } else {
-                                store.exitEditMode()
-                            }
-                        }
-                    )
-                    .id("edit-\(document.id)")
-                } else if store.preferences.mode == .scroll {
+                if store.preferences.mode == .scroll {
                     ScrollReaderView(
-                        document: document,
+                        document: presentationDocument,
                         preferences: store.preferences,
                         palette: store.palette,
                         locationRequest: store.locationRequest(in: pane),
@@ -57,11 +39,20 @@ struct ReaderView: View {
                         searchHighlight: store.searchHighlight(in: pane),
                         onProgress: { store.updateReadingOffset($0, in: pane) },
                         onDoubleClick: { store.enterEditMode(pane) },
-                        onActivate: { store.activateReader(pane) }
+                        onActivate: { store.activateReader(pane) },
+                        isEditing: isEditing,
+                        draftText: presentationDocument.displayText,
+                        draftEpoch: store.draftEpoch,
+                        onTextChange: store.updateDraft,
+                        onExit: {
+                            if store.findBarPresented && store.findPane == pane { store.dismissFindBar() }
+                            else { store.exitEditMode() }
+                        },
+                        onAttributedTextChange: store.updateEditedText
                     )
                 } else {
                     PagedReaderView(
-                        document: document,
+                        document: presentationDocument,
                         preferences: store.preferences,
                         palette: store.palette,
                         locationRequest: store.locationRequest(in: pane),
@@ -69,7 +60,16 @@ struct ReaderView: View {
                         searchHighlight: store.searchHighlight(in: pane),
                         onProgress: { store.updateReadingOffset($0, in: pane) },
                         onDoubleClick: { store.enterEditMode(pane) },
-                        onActivate: { store.activateReader(pane) }
+                        onActivate: { store.activateReader(pane) },
+                        isEditing: isEditing,
+                        draftText: presentationDocument.displayText,
+                        draftEpoch: store.draftEpoch,
+                        onTextChange: store.updateDraft,
+                        onExit: {
+                            if store.findBarPresented && store.findPane == pane { store.dismissFindBar() }
+                            else { store.exitEditMode() }
+                        },
+                        onAttributedTextChange: store.updateEditedText
                     )
                     .id("paged-\(document.id)")
                 }
@@ -155,8 +155,7 @@ struct ReaderView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 3))
                 .fixedSize()
                 .help(isEditing ? "Esc 退出编辑" : "双击正文进入编辑")
-            if !isEditing {
-                Button {
+            Button {
                     store.jumpToBeginning(in: pane)
                 } label: {
                     Image(systemName: "arrow.up.to.line")
@@ -167,7 +166,6 @@ struct ReaderView: View {
                 .foregroundStyle(store.palette.faint)
                 .disabled(store.readingOffset(in: pane) == 0)
                 .help(store.preferences.mode == .scroll ? "返回顶部" : "返回第一页")
-            }
             if pane == .comparison {
                 Button {
                     store.closeComparison()
@@ -208,6 +206,10 @@ struct ReaderView: View {
         return max(20, (NSScreen.main?.frame.width ?? 1280 - store.preferences.contentWidth) / 8)
     }
 
+    private var presentationDocument: ReaderDocument {
+        store.presentationDocument(in: pane) ?? document
+    }
+
     private var isEditing: Bool {
         pane == store.editingPane && store.isEditingContent
     }
@@ -217,10 +219,7 @@ struct ReaderView: View {
     }
 
     private var readerMetricsLabel: String {
-        let count = (isEditing ? store.draftText as NSString : document.displayText as NSString).length
-        if isEditing {
-            return "\(count.formatted()) 字"
-        }
+        let count = presentationDocument.characterCount
         return "\(count.formatted()) 字 · \(store.readingPercentage(in: pane))%"
     }
 

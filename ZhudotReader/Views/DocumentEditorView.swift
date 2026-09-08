@@ -16,7 +16,7 @@ struct DocumentEditorView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+        let scrollView = ReaderScrollView()
         scrollView.drawsBackground = true
 
         let textView = EditorTextView(frame: .zero)
@@ -62,8 +62,12 @@ struct DocumentEditorView: NSViewRepresentable {
         scrollView.backgroundColor = palette.nsPaper
         scrollView.applyReaderScroller(palette: palette)
         textView.backgroundColor = palette.nsPaper
-        textView.font = preferences.fontFamily.font(size: preferences.fontSize)
-        textView.textColor = palette.nsText
+        let attributes = DocumentLoader().baseAttributes(preferences: preferences, palette: palette)
+        if !textView.hasMarkedText() {
+            textView.textStorage?.setAttributes(attributes, range: NSRange(location: 0, length: (textView.string as NSString).length))
+            textView.typingAttributes = attributes
+            textView.defaultParagraphStyle = attributes[.paragraphStyle] as? NSParagraphStyle
+        }
         textView.insertionPointColor = palette.nsAccent
         textView.textContainerInset = NSSize(width: preferences.pageMargin, height: 34)
 
@@ -72,7 +76,7 @@ struct DocumentEditorView: NSViewRepresentable {
             context.coordinator.draftEpoch = draftEpoch
             context.coordinator.highlightID = searchHighlight.id
             context.coordinator.isApplying = true
-            textView.string = text
+            textView.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: attributes))
             context.coordinator.isApplying = false
             DispatchQueue.main.async {
                 textView.window?.makeFirstResponder(textView)
@@ -83,7 +87,7 @@ struct DocumentEditorView: NSViewRepresentable {
             context.coordinator.highlightID = searchHighlight.id
             let selected = textView.selectedRange()
             context.coordinator.isApplying = true
-            textView.string = text
+            textView.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: attributes))
             context.coordinator.isApplying = false
             if NSMaxRange(selected) <= (text as NSString).length {
                 textView.setSelectedRange(selected)
@@ -135,12 +139,72 @@ final class EditorTextView: NSTextView {
 }
 
 final class DoubleClickAwareTextView: NSTextView {
+    var editingUndoManager = UndoManager()
+    override var undoManager: UndoManager? { editingUndoManager }
+    var onExit: (() -> Void)?
+
+    override func cancelOperation(_ sender: Any?) { onExit?() }
+
+    private(set) var pendingEditSelection: NSRange?
+    private var pendingEditOrigin: NSPoint?
+    private var focusTransition = UUID()
+
+    func configureInlineEditing(_ editing: Bool, attributes: [NSAttributedString.Key: Any], palette: ReaderPalette, preservesFormatting: Bool = false) {
+        if isEditable != editing { isEditable = editing }
+        allowsUndo = true
+        usesFindBar = false
+        usesFindPanel = false
+        isAutomaticQuoteSubstitutionEnabled = false
+        isAutomaticDashSubstitutionEnabled = false
+        isAutomaticTextReplacementEnabled = false
+        isAutomaticSpellingCorrectionEnabled = false
+        insertionPointColor = palette.nsAccent
+        if !hasMarkedText(), !preservesFormatting || string.isEmpty { typingAttributes = attributes }
+    }
+
+    func finishEnteringEdit(fallback: NSRange) {
+        let selection = pendingEditSelection ?? fallback
+        let origin = pendingEditOrigin ?? enclosingScrollView?.contentView.bounds.origin
+        pendingEditSelection = nil
+        pendingEditOrigin = nil
+        let length = (string as NSString).length
+        setSelectedRange(NSRange(location: min(selection.location, length), length: min(selection.length, max(0, length - selection.location))))
+        window?.makeFirstResponder(self)
+        func restoreViewport() {
+            if let origin, let scroll = enclosingScrollView {
+                scroll.contentView.scroll(to: origin)
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+        }
+        restoreViewport()
+        let transition = UUID()
+        focusTransition = transition
+        // Becoming first responder can schedule another AppKit scroll. Preserve the
+        // actual viewport after that pass too, without issuing a reader jump request.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isEditable, self.focusTransition == transition,
+                  self.window?.firstResponder === self,
+                  self.selectedRange().location == min(selection.location, length) else { return }
+            if let origin, let scroll = self.enclosingScrollView {
+                scroll.contentView.scroll(to: origin)
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+        }
+    }
+
+    // Documents are text files: paste text without importing another application's fonts.
+    override func paste(_ sender: Any?) { pasteAsPlainText(sender) }
+
     var onDoubleClick: (() -> Void)?
     var onActivate: (() -> Void)?
 
     override func mouseDown(with event: NSEvent) {
         onActivate?()
-        if event.clickCount == 2 {
+        if event.clickCount == 2 && !isEditable {
+            // Place the insertion point in the existing layout before enabling editing.
+            let point = convert(event.locationInWindow, from: nil)
+            pendingEditSelection = NSRange(location: characterIndexForInsertion(at: point), length: 0)
+            pendingEditOrigin = enclosingScrollView?.contentView.bounds.origin
             onDoubleClick?()
             return
         }

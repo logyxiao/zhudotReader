@@ -67,6 +67,7 @@ final class ReaderStore {
     var isEditingContent = false
     var editingPane: ReaderPane = .primary
     var draftText = ""
+    var draftDocument: ReaderDocument?
     var isDraftDirty = false
     var renamingNodeID: String?
     var isLoading = false
@@ -101,6 +102,9 @@ final class ReaderStore {
                 || preferences.fontFamily != oldValue.fontFamily
                 || preferences.fontSize != oldValue.fontSize
                 || preferences.lineHeight != oldValue.lineHeight {
+                if isEditingContent, let draftDocument {
+                    self.draftDocument = documentLoader.restyle(draftDocument, source: draftText, preferences: preferences, palette: palette)
+                }
                 scheduleDocumentRestyle()
             }
         }
@@ -196,14 +200,14 @@ final class ReaderStore {
 
     private static let documentCacheCharacterLimit = 4_000_000
 
-    init() {
-        preferences = Self.loadPreferences()
-        lastDocumentByLibrary = Self.loadLastDocuments()
-        progressByPath = Self.loadProgress()
-        restoreTask = Task { [weak self] in
-            await self?.restoreLibraries()
+    init(restoreSession: Bool = true) {
+        preferences = restoreSession ? Self.loadPreferences() : ReaderPreferences()
+        lastDocumentByLibrary = restoreSession ? Self.loadLastDocuments() : [:]
+        progressByPath = restoreSession ? Self.loadProgress() : [:]
+        if restoreSession {
+            restoreTask = Task { [weak self] in await self?.restoreLibraries() }
+            IncomingDocuments.attach(self)
         }
-        IncomingDocuments.attach(self)
     }
 
     func chooseLibrary() {
@@ -302,6 +306,7 @@ final class ReaderStore {
         comparisonReadingOffset = 0
         isEditingContent = false
         draftText = ""
+        draftDocument = nil
         isDraftDirty = false
         renamingNodeID = nil
         libraryNodes = []
@@ -498,6 +503,7 @@ final class ReaderStore {
             if editingPane == target { return }
             Task {
                 await finishEditing()
+                guard !isEditingContent else { return }
                 beginEditing(target)
             }
             return
@@ -510,6 +516,7 @@ final class ReaderStore {
         focusPane(pane)
         editingPane = pane
         draftText = document.sourceText
+        draftDocument = document
         isDraftDirty = false
         isEditingContent = true
     }
@@ -520,10 +527,30 @@ final class ReaderStore {
     }
 
     func updateDraft(_ text: String) {
-        guard isEditingContent else { return }
+        guard isEditingContent, let document = document(in: editingPane) else { return }
         draftText = text
+        draftDocument = documentLoader.restyle(document, source: text, preferences: preferences, palette: palette)
         isDraftDirty = true
         scheduleDraftSave()
+    }
+
+    func updateEditedText(_ text: NSAttributedString) {
+        guard isEditingContent, let document = document(in: editingPane) else { return }
+        let source = document.format == .markdown ? MarkdownDraftWriter.source(from: text) : text.string
+        draftText = source
+        draftDocument = ReaderDocument(
+            id: document.id, url: document.url, title: document.title, format: document.format,
+            sourceText: source, displayText: text.string,
+            attributedText: NSAttributedString(attributedString: text), chapters: document.chapters,
+            characterCount: text.length, contentFingerprint: source.hashValue
+        )
+        isDraftDirty = true
+        scheduleDraftSave()
+    }
+
+    func presentationDocument(in pane: ReaderPane) -> ReaderDocument? {
+        if isEditingContent, editingPane == pane, let draftDocument { return draftDocument }
+        return document(in: pane)
     }
 
     func saveDraftNow() {
@@ -663,7 +690,7 @@ final class ReaderStore {
             return
         }
         if editingThis {
-            draftText = tidied
+            updateDraft(tidied)
             isDraftDirty = true
             draftEpoch += 1
             applyDocumentSource(tidied, in: pane)
@@ -973,6 +1000,14 @@ final class ReaderStore {
     }
 
     func replaceCurrentFind() {
+        if isEditingContent, editingPane != findPane {
+            Task {
+                await finishEditing()
+                guard !isEditingContent else { return }
+                replaceCurrentFind()
+            }
+            return
+        }
         guard !findQuery.isEmpty, findHits.indices.contains(findIndex) else { return }
         let range = findHits[findIndex]
         if canReplaceInFileDirectly {
@@ -985,24 +1020,28 @@ final class ReaderStore {
     }
 
     func replaceAllFind() {
+        if isEditingContent, editingPane != findPane {
+            Task {
+                await finishEditing()
+                guard !isEditingContent else { return }
+                replaceAllFind()
+            }
+            return
+        }
         guard !findQuery.isEmpty else { return }
         if canReplaceInFileDirectly {
             Task { await replaceInFile(range: nil, replacingAll: true) }
             return
         }
         ensureEditingForReplace()
-        let result = TextSearch.replacing(
-            in: draftText,
-            query: findQuery,
-            replacement: findReplacement,
-            matchCase: findMatchCase
-        )
-        guard result.count > 0 else { return }
-        draftText = result.text
-        isDraftDirty = true
+        guard let draftDocument else { return }
+        let matches = TextSearch.matches(in: draftDocument.displayText, query: findQuery, matchCase: findMatchCase)
+        guard !matches.isEmpty else { return }
+        let replacement = NSMutableAttributedString(attributedString: draftDocument.attributedText)
+        for match in matches.reversed() { replacement.replaceCharacters(in: match, with: findReplacement) }
+        updateEditedText(replacement)
         draftEpoch += 1
-        scheduleDraftSave()
-        noticeMessage = "已替换 \(result.count) 处。"
+        noticeMessage = "已替换 \(matches.count) 处。"
         exportedWordURL = nil
         recomputeFindHits(preferLocation: 0)
     }
@@ -1021,17 +1060,15 @@ final class ReaderStore {
     }
 
     private func applyReplaceInDraft(range: NSRange) {
-        let ns = draftText as NSString
-        guard NSMaxRange(range) <= ns.length else {
+        guard let draftDocument, NSMaxRange(range) <= draftDocument.attributedText.length else {
             recomputeFindHits()
             return
         }
-        let nextLocation = range.location + (findReplacement as NSString).length
-        draftText = ns.replacingCharacters(in: range, with: findReplacement)
-        isDraftDirty = true
+        let replacement = NSMutableAttributedString(attributedString: draftDocument.attributedText)
+        replacement.replaceCharacters(in: range, with: findReplacement)
+        updateEditedText(replacement)
         draftEpoch += 1
-        scheduleDraftSave()
-        recomputeFindHits(preferLocation: nextLocation)
+        recomputeFindHits(preferLocation: range.location + (findReplacement as NSString).length)
     }
 
     private func replaceInFile(range: NSRange?, replacingAll: Bool) async {
@@ -1076,6 +1113,7 @@ final class ReaderStore {
     private func restyleEditingDocument() {
         guard isEditingContent, let document = document(in: editingPane) else { return }
         applyDocumentSource(draftText, in: editingPane, existing: document)
+        draftDocument = self.document(in: editingPane)
     }
 
     private func applyDocumentSource(_ source: String, in pane: ReaderPane, existing: ReaderDocument? = nil) {
@@ -1090,7 +1128,7 @@ final class ReaderStore {
 
     private func findHaystack() -> String? {
         if isEditingContent, editingPane == findPane {
-            return draftText
+            return draftDocument?.displayText ?? draftText
         }
         return document(in: findPane)?.displayText
     }
@@ -1553,6 +1591,10 @@ final class ReaderStore {
             if let original = primarySnapshot,
                let restyled = results.0,
                self.currentDocument?.id == original.id {
+                if self.isEditingContent && self.editingPane == .primary {
+                    guard self.draftText == primarySource else { return }
+                    self.draftDocument = restyled
+                }
                 self.currentDocument = restyled
                 self.cacheDocument(restyled, preferences: targetPreferences)
                 self.requestLocation(self.readingOffset)
@@ -1560,6 +1602,10 @@ final class ReaderStore {
             if let original = comparisonSnapshot,
                let restyled = results.1,
                self.comparisonDocument?.id == original.id {
+                if self.isEditingContent && self.editingPane == .comparison {
+                    guard self.draftText == comparisonSource else { return }
+                    self.draftDocument = restyled
+                }
                 self.comparisonDocument = restyled
                 self.cacheDocument(restyled, preferences: targetPreferences)
                 self.requestComparisonLocation(self.comparisonReadingOffset)
@@ -1750,6 +1796,7 @@ final class ReaderStore {
             if isEditingContent, editingPane == .primary {
                 isEditingContent = false
                 draftText = ""
+                draftDocument = nil
                 isDraftDirty = false
             }
         }
@@ -1758,6 +1805,7 @@ final class ReaderStore {
             if isEditingContent, editingPane == .comparison {
                 isEditingContent = false
                 draftText = ""
+                draftDocument = nil
                 isDraftDirty = false
             }
             tearDownComparison()
@@ -1785,6 +1833,7 @@ final class ReaderStore {
                       findDocument(path: currentDocument.id, in: nodes) == nil {
                 isEditingContent = false
                 draftText = ""
+                draftDocument = nil
                 isDraftDirty = false
                 if let first = firstDocument(in: nodes) {
                     await loadDocument(at: first.url, libraryID: activeLibrary.id)
@@ -1944,7 +1993,7 @@ final class ReaderStore {
 
     private func finishEditing() async {
         guard isEditingContent else { return }
-        await saveDraftIfNeeded()
+        guard await saveDraftIfNeeded(), !isDraftDirty else { return }
         let source = draftText
         let pane = editingPane
         isEditingContent = false
@@ -1956,7 +2005,6 @@ final class ReaderStore {
                 preferences: preferences,
                 palette: palette
             )
-            requestComparisonLocation(comparisonReadingOffset)
         } else if let currentDocument {
             self.currentDocument = documentLoader.restyle(
                 currentDocument,
@@ -1964,22 +2012,39 @@ final class ReaderStore {
                 preferences: preferences,
                 palette: palette
             )
-            requestLocation(readingOffset)
         }
+        draftDocument = nil
         editingPane = .primary
     }
 
-    private func saveDraftIfNeeded() async {
-        guard isDraftDirty, let url = document(in: editingPane)?.url else { return }
+    @discardableResult
+    private func saveDraftIfNeeded() async -> Bool {
+        guard isDraftDirty else { return true }
+        guard let document = document(in: editingPane) else { return false }
+        let url = document.url
+        let pane = editingPane
         let text = draftText
+        let visibleText = draftDocument?.displayText
+        let currentPreferences = preferences
+        let currentPalette = palette
         do {
             try validateManagedURL(url)
             try await Task.detached {
+                if document.format == .markdown, let visibleText {
+                    let rendered = DocumentLoader().restyle(document, source: text, preferences: currentPreferences, palette: currentPalette)
+                    guard rendered.displayText.utf16.elementsEqual(visibleText.utf16) else {
+                        throw ReaderError.fileOperationFailed("这处 Markdown 结构暂时无法原样保存，编辑内容已保留，请先撤销最近一次结构修改。")
+                    }
+                }
                 try Data(text.utf8).write(to: url, options: .atomic)
             }.value
-            isDraftDirty = false
+            if editingPane == pane, self.document(in: pane)?.url == url, draftText == text {
+                isDraftDirty = false
+            }
+            return true
         } catch {
             errorMessage = ReaderError.fileOperationFailed(error.localizedDescription).localizedDescription
+            return false
         }
     }
 

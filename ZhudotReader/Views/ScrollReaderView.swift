@@ -12,8 +12,15 @@ struct ScrollReaderView: NSViewRepresentable {
     var onDoubleClick: (() -> Void)? = nil
     var onActivate: (() -> Void)? = nil
 
+    var isEditing = false
+    var draftText = ""
+    var draftEpoch = 0
+    var onTextChange: ((String) -> Void)? = nil
+    var onExit: (() -> Void)? = nil
+    var onAttributedTextChange: ((NSAttributedString) -> Void)? = nil
+
     private var styleSignature: String {
-        "\(preferences.theme.rawValue)-\(preferences.fontFamily.rawValue)-\(preferences.fontSize)-\(preferences.lineHeight.rawValue)-\(preferences.pageMargin)-\(document.contentFingerprint)"
+        "\(preferences.theme.rawValue)-\(preferences.fontFamily.rawValue)-\(preferences.fontSize)-\(preferences.lineHeight.rawValue)-\(preferences.pageMargin)"
     }
 
     func makeCoordinator() -> Coordinator {
@@ -21,11 +28,12 @@ struct ScrollReaderView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+        let scrollView = ReaderScrollView()
         scrollView.drawsBackground = true
         scrollView.contentView.postsBoundsChangedNotifications = true
 
         let textView = DoubleClickAwareTextView(frame: .zero)
+        textView.delegate = context.coordinator
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = true
@@ -61,19 +69,58 @@ struct ScrollReaderView: NSViewRepresentable {
         textView.backgroundColor = palette.nsPaper
         textView.textContainerInset = NSSize(width: preferences.pageMargin, height: 34)
 
-            if context.coordinator.documentID != document.id ||
-                context.coordinator.styleSignature != styleSignature {
-            context.coordinator.isRestoring = true
-            textView.textStorage?.setAttributedString(document.attributedText)
-            context.coordinator.documentID = document.id
-            context.coordinator.styleSignature = styleSignature
-            context.coordinator.highlightID = searchHighlight.id
-            DispatchQueue.main.async {
-                context.coordinator.restore(locationRequest.offset)
-                context.coordinator.apply(searchHighlight, palette: palette)
+        let coordinator = context.coordinator
+        coordinator.onTextChange = onTextChange
+        coordinator.onAttributedTextChange = onAttributedTextChange
+        textView.onExit = onExit
+        let attributes = DocumentLoader().baseAttributes(preferences: preferences, palette: palette)
+        let entering = isEditing && !coordinator.wasEditing
+        textView.configureInlineEditing(isEditing, attributes: attributes, palette: palette, preservesFormatting: document.format == .markdown)
+        let changedDocument = coordinator.documentID != document.id
+        let changedStyle = coordinator.styleSignature != styleSignature
+        let desired = isEditing ? draftText : document.displayText
+        if changedDocument || (!textView.hasMarkedText() && textView.string != desired) {
+            coordinator.isRestoring = true
+            let selection = textView.selectedRange()
+            let origin = scrollView.contentView.bounds.origin
+            if isEditing && document.format == .text {
+                textView.textStorage?.setAttributedString(NSAttributedString(string: desired, attributes: attributes))
+            } else {
+                textView.textStorage?.setAttributedString(document.attributedText)
             }
-        } else if context.coordinator.locationRequestID != locationRequest.id {
-            context.coordinator.restore(locationRequest.offset)
+            if changedDocument {
+                textView.undoManager?.removeAllActions()
+                DispatchQueue.main.async { coordinator.restore(locationRequest.offset) }
+            } else {
+                textView.setSelectedRange(NSRange(location: min(selection.location, (desired as NSString).length), length: 0))
+                scrollView.contentView.scroll(to: origin)
+                DispatchQueue.main.async { coordinator.isRestoring = false }
+            }
+        } else if changedStyle && !textView.hasMarkedText() {
+            let selection = textView.selectedRange()
+            let origin = scrollView.contentView.bounds.origin
+            if document.format == .text {
+                textView.textStorage?.setAttributes(attributes, range: NSRange(location: 0, length: (desired as NSString).length))
+            } else {
+                textView.textStorage?.setAttributedString(document.attributedText)
+            }
+            textView.setSelectedRange(selection)
+            scrollView.contentView.scroll(to: origin)
+        } else if coordinator.locationRequestID != locationRequest.id {
+            coordinator.restore(locationRequest.offset)
+        }
+        coordinator.documentID = document.id
+        if !textView.hasMarkedText() { coordinator.styleSignature = styleSignature }
+        coordinator.wasEditing = isEditing
+        if entering {
+            var fallback = textView.selectedRange()
+            if let manager = textView.layoutManager, let container = textView.textContainer {
+                let rect = textView.visibleRect.offsetBy(dx: -textView.textContainerOrigin.x, dy: -textView.textContainerOrigin.y)
+                let glyphs = manager.glyphRange(forBoundingRect: rect, in: container)
+                let visible = manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+                if !NSLocationInRange(fallback.location, visible) { fallback = NSRange(location: visible.location, length: 0) }
+            }
+            textView.finishEnteringEdit(fallback: fallback)
         }
         context.coordinator.locationRequestID = locationRequest.id
 
@@ -94,7 +141,17 @@ struct ScrollReaderView: NSViewRepresentable {
         coordinator.stopObserving()
     }
 
-    final class Coordinator: NSObject {
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var wasEditing = false
+        var onTextChange: ((String) -> Void)?
+        var onAttributedTextChange: ((NSAttributedString) -> Void)?
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView, textView.isEditable, !textView.hasMarkedText() else { return }
+            if let onAttributedTextChange { onAttributedTextChange(textView.attributedString()) }
+            else { onTextChange?(textView.string) }
+            reportProgress()
+        }
         weak var textView: DoubleClickAwareTextView?
         weak var scrollView: NSScrollView?
         var documentID: String?
@@ -172,12 +229,21 @@ struct ScrollReaderView: NSViewRepresentable {
                   let layoutManager = textView.layoutManager,
                   let textContainer = textView.textContainer else { return }
 
-            let visibleY = scrollView.contentView.bounds.minY + textView.textContainerInset.height
-            let point = NSPoint(x: textView.textContainerInset.width + 2, y: visibleY)
+            guard layoutManager.numberOfGlyphs > 0 else { onProgress(0); return }
+            let point = NSPoint(x: 2, y: max(0, scrollView.contentView.bounds.minY - textView.textContainerOrigin.y))
             let glyph = layoutManager.glyphIndex(for: point, in: textContainer)
-            let character = layoutManager.characterIndexForGlyph(at: glyph)
+            let character = layoutManager.characterIndexForGlyph(at: min(glyph, layoutManager.numberOfGlyphs - 1))
             onProgress(character)
         }
+    }
+}
+
+final class ReaderScrollView: NSScrollView {
+    override func tile() {
+        // AppKit may adopt the system's legacy style when a view enters a window.
+        // Keep the overlay policy stable before computing the text container width.
+        if scrollerStyle != .overlay { scrollerStyle = .overlay }
+        super.tile()
     }
 }
 
@@ -233,6 +299,7 @@ extension NSScrollView {
 
         if let scroller = verticalScroller as? ReaderScroller {
             scroller.apply(palette)
+            tile()
             return
         }
 
@@ -241,6 +308,7 @@ extension NSScrollView {
         scroller.scrollerStyle = .overlay
         scroller.apply(palette)
         verticalScroller = scroller
+        tile()
     }
 }
 

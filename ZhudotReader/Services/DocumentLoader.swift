@@ -87,6 +87,19 @@ struct DocumentLoader {
 
             let range = NSRange(location: start, length: length)
             output.addAttributes(baseAttributes(preferences: preferences, palette: palette), range: range)
+            let blockName: String
+            switch block.kind {
+            case let .heading(level): blockName = "heading:\(level)"
+            case .quote: blockName = "quote"
+            case .list: blockName = "list"
+            case .rule: blockName = "rule"
+            case .body: blockName = "body"
+            }
+            output.addAttributes([
+                .readerMarkdownSource: line,
+                .readerMarkdownDisplay: parsed.string,
+                .readerMarkdownBlock: blockName
+            ], range: range)
             applyInlineTraits(to: output, range: range, baseFont: preferences.fontFamily.font(size: preferences.fontSize))
 
             switch block.kind {
@@ -162,6 +175,10 @@ struct DocumentLoader {
         return (line, .body)
     }
 
+    func markdownLinePresentation(_ source: String) -> NSAttributedString {
+        inlineMarkdown(markdownBlock(for: source).text)
+    }
+
     private func inlineMarkdown(_ source: String) -> NSMutableAttributedString {
         guard !source.isEmpty,
               let parsed = try? AttributedString(
@@ -173,7 +190,7 @@ struct DocumentLoader {
         return NSMutableAttributedString(attributedString: NSAttributedString(parsed))
     }
 
-    private func baseAttributes(preferences: ReaderPreferences, palette: ReaderPalette) -> [NSAttributedString.Key: Any] {
+    func baseAttributes(preferences: ReaderPreferences, palette: ReaderPalette) -> [NSAttributedString.Key: Any] {
         [
             .font: preferences.fontFamily.font(size: preferences.fontSize),
             .foregroundColor: palette.nsText,
@@ -226,3 +243,152 @@ private extension NSMutableAttributedString {
     var fullRange: NSRange { NSRange(location: 0, length: length) }
 }
 
+
+extension NSAttributedString.Key {
+    static let readerMarkdownSource = Self("ZhudotMarkdownSource")
+    static let readerMarkdownDisplay = Self("ZhudotMarkdownDisplay")
+    static let readerMarkdownBlock = Self("ZhudotMarkdownBlock")
+}
+
+/// Keep untouched Markdown lines byte-for-byte. Changed lines are written from
+/// their visible text and semantic attributes, so hidden syntax is never exposed
+/// just to enter editing and links/emphasis are not flattened into plain text.
+enum MarkdownDraftWriter {
+    static func source(from text: NSAttributedString) -> String {
+        let lines = text.string.components(separatedBy: "\n")
+        var offset = 0
+        return lines.map { line in
+            let length = (line as NSString).length
+            let range = NSRange(location: offset, length: length)
+            defer { offset += length + 1 }
+            let attributes = offset < text.length ? text.attributes(at: offset, effectiveRange: nil) : [:]
+            if let original = attributes[.readerMarkdownSource] as? String,
+               let visible = attributes[.readerMarkdownDisplay] as? String, visible == line {
+                return original
+            }
+            if let original = attributes[.readerMarkdownSource] as? String,
+               let visible = attributes[.readerMarkdownDisplay] as? String,
+               let preserved = preservedEdit(source: original, visible: visible, edited: text.attributedSubstring(from: range)) {
+                return preserved
+            }
+            guard length > 0 else { return "" }
+            let block = attributes[.readerMarkdownBlock] as? String ?? "body"
+            var content = range
+            var prefix = ""
+            if block.hasPrefix("heading:"), let level = Int(block.dropFirst(8)), (1...6).contains(level) {
+                prefix = String(repeating: "#", count: level) + " "
+            } else if block == "quote" {
+                prefix = "> "
+            } else if block == "list", line.hasPrefix("•  ") {
+                content.location += 3; content.length -= 3
+                prefix = "- "
+            }
+            // An edited rule or a deleted bullet becomes an ordinary paragraph.
+            return prefix + inline(text.attributedSubstring(from: content))
+        }.joined(separator: "\n")
+    }
+
+    private static func preservedEdit(source: String, visible: String, edited: NSAttributedString) -> String? {
+        let old = Array(visible), new = Array(edited.string)
+        var prefix = 0, suffix = 0
+        while prefix < min(old.count, new.count), old[prefix] == new[prefix] { prefix += 1 }
+        while suffix < min(old.count, new.count) - prefix,
+              old[old.count - 1 - suffix] == new[new.count - 1 - suffix] { suffix += 1 }
+        let start = String(old.prefix(prefix)).utf16.count
+        let end = visible.utf16.count - String(old.suffix(suffix)).utf16.count
+        let inserted = String(new[prefix..<(new.count - suffix)])
+        let raw = Array(source.utf16), shown = Array(visible.utf16)
+        let difference = shown.difference(from: raw)
+        var removed = Set<Int>(), insertedIndices = Set<Int>()
+        for change in difference {
+            switch change {
+            case let .remove(offset, _, _): removed.insert(offset)
+            case let .insert(offset, _, _): insertedIndices.insert(offset)
+            }
+        }
+        var mapping = [Int?](repeating: nil, count: shown.count)
+        var a = 0, b = 0
+        while a < raw.count || b < shown.count {
+            if removed.contains(a), a < raw.count { a += 1 }
+            else if insertedIndices.contains(b), b < shown.count { b += 1 }
+            else if a < raw.count, b < shown.count { mapping[b] = a; a += 1; b += 1 }
+            else { break }
+        }
+        let sourceRange: NSRange
+        if start == end {
+            let anchor = start < mapping.count ? mapping[start] : mapping.last.flatMap { $0 }.map { $0 + 1 }
+            guard let anchor else { return nil }
+            sourceRange = NSRange(location: anchor, length: 0)
+        } else {
+            guard start < mapping.count, end > 0, let first = mapping[start], let last = mapping[end - 1] else { return nil }
+            sourceRange = NSRange(location: first, length: last - first + 1)
+        }
+        let candidate = (source as NSString).replacingCharacters(in: sourceRange, with: escaped(inserted))
+        let rendered = DocumentLoader().markdownLinePresentation(candidate)
+        guard rendered.string == edited.string, rendered.length == edited.length else { return nil }
+        // A boundary insertion must inherit the same emphasis/link as the caret,
+        // not accidentally move inside a hidden Markdown delimiter.
+        for index in 0..<edited.length {
+            let intent = NSAttributedString.Key("NSInlinePresentationIntent")
+            let lhs = (rendered.attribute(intent, at: index, effectiveRange: nil) as? NSNumber)?.intValue ?? 0
+            let rhs = (edited.attribute(intent, at: index, effectiveRange: nil) as? NSNumber)?.intValue ?? 0
+            guard lhs == rhs else { return nil }
+            let leftLink = rendered.attribute(.link, at: index, effectiveRange: nil).map { String(describing: $0) }
+            let rightLink = edited.attribute(.link, at: index, effectiveRange: nil).map { String(describing: $0) }
+            guard leftLink == rightLink else { return nil }
+        }
+        return candidate
+    }
+
+    private struct Run {
+        var text: String
+        let intent: Int
+        let link: String?
+    }
+
+    private static func inline(_ text: NSAttributedString) -> String {
+        var runs: [Run] = []
+        text.enumerateAttributes(in: NSRange(location: 0, length: text.length)) { attributes, range, _ in
+            let value = (text.string as NSString).substring(with: range)
+            let intent = (attributes[NSAttributedString.Key("NSInlinePresentationIntent")] as? NSNumber)?.intValue ?? 0
+            let link = (attributes[.link] as? URL)?.absoluteString ?? attributes[.link] as? String
+            if let last = runs.last, last.intent == intent, last.link == link {
+                runs[runs.count - 1].text += value
+            } else { runs.append(Run(text: value, intent: intent, link: link)) }
+        }
+        return runs.map { run in
+            var result: String
+            if run.intent & 4 != 0 {
+                let longest = run.text.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0
+                let delimiter = String(repeating: "`", count: longest + 1)
+                let needsSpace = run.text.hasPrefix("`") || run.text.hasSuffix("`") ||
+                    (run.text.hasPrefix(" ") && run.text.hasSuffix(" ") && !run.text.allSatisfy { $0 == " " })
+                result = delimiter + (needsSpace ? " " : "") + run.text + (needsSpace ? " " : "") + delimiter
+            } else {
+                // Delimiters cannot enclose leading/trailing whitespace in Markdown.
+                let leading = String(run.text.prefix(while: { $0.isWhitespace }))
+                let remainder = run.text.dropFirst(leading.count)
+                let trailing = String(remainder.reversed().prefix(while: { $0.isWhitespace }).reversed())
+                let core = String(remainder.dropLast(trailing.count))
+                let emphasis = run.intent & 3
+                let marker = emphasis == 3 ? "***" : (emphasis == 2 ? "**" : (emphasis == 1 ? "*" : ""))
+                var middle = escaped(core)
+                if !core.isEmpty {
+                    middle = marker + middle + marker
+                    if run.intent & 32 != 0 { middle = "~~" + middle + "~~" }
+                }
+                result = escaped(leading) + middle + escaped(trailing)
+            }
+            if let link = run.link {
+                let destination = link.replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E")
+                result = "[" + result + "](<" + destination + ">)"
+            }
+            return result
+        }.joined()
+    }
+
+    private static func escaped(_ text: String) -> String {
+        let punctuation = Set("\\`*_{}[]<>()#+-.!|~")
+        return text.map { punctuation.contains($0) ? "\\" + String($0) : String($0) }.joined()
+    }
+}

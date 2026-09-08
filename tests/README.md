@@ -19,3 +19,21 @@ swiftc -parse-as-library ZhudotReader/Services/LANReadingSync.swift tests/LANRea
 6. 若存在多个网络地址，在二维码面板切换至与手机相同网段的地址。访客 Wi-Fi、客户端隔离或防火墙禁止入站时可能无法连接。
 
 当前范围：单本书的浏览器阅读与阅读位置双向同步。电脑需保持运行；不包含离线书库复制。正文按纯文本显示。两个设备同时操作时，服务器最后接收的位置生效。
+
+## 原位编辑回归
+
+```sh
+python3 tests/run-inline-editing.py
+```
+
+测试创建独立的临时窗口，不读取用户书库。覆盖滚动单栏/窄栏、翻页单页/双页：切换编辑时文本视图身份、完整 frame 和排版属性不变；中文和 emoji、撤销、输入法组合输入提交、跨页插入，以及左右两本书的内容和撤销隔离。
+
+TXT 和 Markdown 使用同一阅读视图原位编辑。Markdown 保留未修改段落的原始源码，改动按当前阅读器支持的标题、强调、引用、列表、行内代码和链接属性保存。保存前检查正文往返一致性，不匹配则保留草稿并报错。
+
+完整交互回归：
+
+```sh
+python3 tests/run-inline-editing.py EditingInteractionSmoke.swift
+```
+
+通过实际 `ContentView`、`ReaderView` 和 `ReaderStore` 触发双击事件，覆盖 TXT/Markdown × 滚动/翻页 × 单书/左右对照的八种组合。检查正文中段或右侧页面的文本视图身份、视口、页范围、栏宽、排版及点击光标保持不变，并验证实际保存文件的显示正文一致。测试使用独立书库和临时文件，不恢复用户会话。

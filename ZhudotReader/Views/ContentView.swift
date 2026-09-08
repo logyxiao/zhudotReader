@@ -121,7 +121,7 @@ struct ContentView: View {
                     .help("转成 Word，保存到文稿所在目录")
                     .disabled(store.activeReadingDocument == nil || store.isExportingWord)
 
-                    if !store.isEditingContent {
+                    Group {
                         Picker("阅读模式", selection: $store.preferences.mode) {
                             ForEach(ReaderMode.allCases) { mode in
                                 Label(mode.label, systemImage: mode.symbol).tag(mode)
